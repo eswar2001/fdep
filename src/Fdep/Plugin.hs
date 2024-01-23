@@ -29,7 +29,7 @@ import GHC
     Name,
     Pat (..),
     PatSynBind (..),
-    noLoc,
+    noLoc, Module (moduleName), moduleNameString
   )
 import GHC.Hs.Binds
   ( LHsBindLR,
@@ -39,7 +39,12 @@ import HscTypes (ModSummary (..))
 import Name (nameStableString)
 import Plugins (CommandLineOption, Plugin (typeCheckResultAction), defaultPlugin)
 import TcRnTypes (TcGblEnv (..), TcM)
-import Prelude hiding (id)
+import Prelude hiding (id,writeFile)
+import Data.Aeson
+import Data.ByteString.Lazy (writeFile)
+import System.Directory (createDirectoryIfMissing)
+import System.Environment (lookupEnv)
+import Data.Maybe (fromMaybe)
 
 plugin :: Plugin
 plugin = defaultPlugin {
@@ -50,41 +55,47 @@ plugin = defaultPlugin {
 purePlugin :: [CommandLineOption] -> IO PluginRecompile
 purePlugin _ = return NoForceRecompile
 
+basePath :: IO (Maybe String)
+basePath = lookupEnv "FDEP_DIR"
+
 fDep :: [CommandLineOption] -> ModSummary -> TcGblEnv -> TcM TcGblEnv
 fDep _ modSummary tcEnv = do
-  let modulePath = ms_hspp_file modSummary
-  liftIO $ print modulePath
+  let modulePath = moduleNameString $ moduleName $ ms_mod modSummary
+  basePath' <- liftIO basePath
   depsMapList <- liftIO $ mapM loopOverLHsBindLR $ bagToList $ tcg_binds tcEnv
-  liftIO $ print depsMapList
+  liftIO $ do
+      createDirectoryIfMissing True (fromMaybe "./fdep/" basePath')
+      print ("generated dependancy for module: " <> modulePath)
+      writeFile ((fromMaybe "./fdep/" basePath') <> modulePath <> ".json") (encode depsMapList)
   return tcEnv
 
 loopOverLHsBindLR :: LHsBindLR GhcTc GhcTc -> IO [(String, [Maybe String])]
 loopOverLHsBindLR (L _ (FunBind _ id matches _ _)) = do
-  print ("FunBind" :: String)
+  -- print ("FunBind" :: String)
   let funName = getOccString $ unLoc id
       matchList = mg_alts matches
       list = map processMatch (unLoc matchList)
   pure [(funName, concat list)]
 loopOverLHsBindLR (L _ (PatBind _ _ pat_rhs _)) = do
-  print ("patBind" :: String)
+  -- print ("patBind" :: String)
   let l = concatMap processGRHS $ grhssGRHSs pat_rhs
   pure [("", l)]
 loopOverLHsBindLR (L _ VarBind {var_rhs = rhs}) = do
-  print ("varBind" :: String)
+  -- print ("varBind" :: String)
   pure [("", processExpr rhs)]
 loopOverLHsBindLR (L _ AbsBinds {abs_binds = binds}) = do
-  print ("absBind" :: String)
+  -- print ("absBind" :: String)
   list <- mapM loopOverLHsBindLR $ bagToList binds
   pure (concat list)
 loopOverLHsBindLR (L _ (PatSynBind _ PSB {psb_def = def})) = do
-  print ("patSynBind PSB" :: String)
+  -- print ("patSynBind PSB" :: String)
   let list = map (Just . traceShowId . nameStableString) $ processPat def
   pure [("", list)]
 loopOverLHsBindLR (L _ (PatSynBind _ (XPatSynBind _))) = do
-  print ("patSynBind XPatSynBind" :: String)
+  -- print ("patSynBind XPatSynBind" :: String)
   pure []
 loopOverLHsBindLR (L _ (XHsBindsLR _)) = do
-  print ("XHsBindsLR" :: String)
+  -- print ("XHsBindsLR" :: String)
   pure []
 
 processMatch :: LMatch GhcTc (LHsExpr GhcTc) -> [Maybe String]
@@ -98,7 +109,7 @@ processGRHS _ = []
 
 processExpr :: LHsExpr GhcTc -> [Maybe String]
 processExpr (L _ (HsVar _ (L _ var))) =
-  let name = traceShowId $ nameStableString $ varName var
+  let name = nameStableString $ varName var
    in [Just name]
 processExpr (L _ (HsUnboundVar _ _)) = []
 processExpr (L _ (HsApp _ funl funr)) =

@@ -42,9 +42,10 @@ import TcRnTypes (TcGblEnv (..), TcM)
 import Prelude hiding (id,writeFile)
 import Data.Aeson
 import Data.ByteString.Lazy (writeFile)
-import System.Directory (createDirectoryIfMissing)
+import System.Directory (createDirectoryIfMissing,getHomeDirectory)
 import System.Environment (lookupEnv)
 import Data.Maybe (fromMaybe)
+import Control.Exception (try,SomeException)
 
 plugin :: Plugin
 plugin = defaultPlugin {
@@ -55,18 +56,14 @@ plugin = defaultPlugin {
 purePlugin :: [CommandLineOption] -> IO PluginRecompile
 purePlugin _ = return NoForceRecompile
 
-basePath :: IO (Maybe String)
-basePath = lookupEnv "FDEP_DIR"
-
 fDep :: [CommandLineOption] -> ModSummary -> TcGblEnv -> TcM TcGblEnv
 fDep _ modSummary tcEnv = do
-  let modulePath = moduleNameString $ moduleName $ ms_mod modSummary
-  basePath' <- liftIO basePath
+  let moduleName' = moduleNameString $ moduleName $ ms_mod modSummary
+  let modulePath = ms_hspp_file modSummary
   depsMapList <- liftIO $ mapM loopOverLHsBindLR $ bagToList $ tcg_binds tcEnv
   liftIO $ do
-      createDirectoryIfMissing True (fromMaybe "./fdep/" basePath')
-      print ("generated dependancy for module: " <> modulePath)
-      writeFile ((fromMaybe "./fdep/" basePath') <> modulePath <> ".json") (encode depsMapList)
+      print ("generated dependancy for module: " <> moduleName' <> " at path: " <> modulePath)
+      writeFile ((modulePath) <> ".json") (encode depsMapList)
   return tcEnv
 
 loopOverLHsBindLR :: LHsBindLR GhcTc GhcTc -> IO [(String, [Maybe String])]

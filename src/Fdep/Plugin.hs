@@ -43,7 +43,6 @@ import Prelude hiding (id,writeFile)
 import Data.Aeson
 import Data.ByteString.Lazy (writeFile)
 import System.Directory (createDirectoryIfMissing,getHomeDirectory)
-import System.Environment (lookupEnv)
 import Data.Maybe (fromMaybe)
 import Control.Exception (try,SomeException)
 

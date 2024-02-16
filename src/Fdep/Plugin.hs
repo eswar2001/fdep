@@ -54,6 +54,7 @@ import Data.List
 import Data.List.Extra (replace,splitOn)
 import Data.Maybe (fromJust,isJust)
 import Fdep.Types
+import Data.Aeson.Encode.Pretty (encodePretty)
 
 plugin :: Plugin
 plugin = defaultPlugin {
@@ -71,46 +72,38 @@ fDep _ modSummary tcEnv = do
   depsMapList <- liftIO $ mapM loopOverLHsBindLR $ bagToList $ tcg_binds tcEnv
   liftIO $ do
       print ("generated dependancy for module: " <> moduleName' <> " at path: " <> modulePath)
-      writeFile ((modulePath) <> ".json") (encode $ concat depsMapList)
+      writeFile ((modulePath) <> ".json") (encodePretty $ concat depsMapList)
   return tcEnv
 
 transformFromNameStableString :: Maybe String -> Maybe FunctionInfo
 transformFromNameStableString (Just str) =
-  let parts = splitOn ("$") str
-      func_name = if length parts > 4 then concat (drop 3 parts) else parts !! 3
-  in Just $ FunctionInfo (parts !! 1) (parts !! 2) func_name
+  let parts = filter (\x -> x /= "") $ splitOn ("$") str
+  in Just $ if length parts == 2 then  FunctionInfo "" (parts !! 0) (parts !! 1) else FunctionInfo (parts !! 0) (parts !! 1) (parts !! 2)
 
 loopOverLHsBindLR :: LHsBindLR GhcTc GhcTc -> IO [Function]
 loopOverLHsBindLR (L _ (FunBind _ id matches _ _)) = do
-  -- print ("FunBind" :: String)
   let funName = getOccString $ unLoc id
       matchList = mg_alts matches
   (list,funcs) <- foldM (\(x,y) xx -> do
                                   (l,f) <- processMatch xx
                                   pure $ (x <> l,y <> f)
                         ) ([],[]) (unLoc matchList)
-  let listTransformed = map transformFromNameStableString list
-  pure [(Function funName listTransformed funcs)]
+  let listTransformed = map transformFromNameStableString $ nub $ list
+  pure [(Function funName listTransformed (nub funcs))]
 loopOverLHsBindLR (L _ (PatBind _ _ pat_rhs _)) = do
-  -- print ("patBind" :: String)
   let l = map transformFromNameStableString $ concatMap processGRHS $ grhssGRHSs pat_rhs
   pure [(Function "" l [])]
 loopOverLHsBindLR (L _ VarBind {var_rhs = rhs}) = do
-  -- print ("varBind" :: String)
   pure [(Function "" (map transformFromNameStableString $ processExpr rhs) [])]
 loopOverLHsBindLR (L _ AbsBinds {abs_binds = binds}) = do
-  -- print ("absBind" :: String)
   list <- mapM loopOverLHsBindLR $ bagToList binds
   pure (concat list)
 loopOverLHsBindLR (L _ (PatSynBind _ PSB {psb_def = def})) = do
-  -- print ("patSynBind PSB" :: String)
   let list = map transformFromNameStableString $ map (Just . traceShowId . nameStableString) $ processPat def
   pure [(Function "" list [])]
 loopOverLHsBindLR (L _ (PatSynBind _ (XPatSynBind _))) = do
-  -- print ("patSynBind XPatSynBind" :: String)
   pure []
 loopOverLHsBindLR (L _ (XHsBindsLR _)) = do
-  -- print ("XHsBindsLR" :: String)
   pure []
 
 processMatch :: LMatch GhcTc (LHsExpr GhcTc) -> IO ([Maybe String],[Function])
@@ -126,17 +119,14 @@ processGRHS _ = []
 processHsLocalBinds :: HsLocalBindsLR GhcTc GhcTc -> IO [Function]
 processHsLocalBinds (HsValBinds _ (ValBinds _ x y)) = do
   res <- mapM loopOverLHsBindLR $ bagToList $ x
-  -- print "ValBinds"
   pure $ concat res
 processHsLocalBinds (HsValBinds _ (XValBindsLR (NValBinds x y))) = do
   res <- foldM (\acc (recFlag,binds) -> do 
                   funcs <- mapM loopOverLHsBindLR $ bagToList binds
                   pure (acc <> funcs)
                 ) [] x
-  -- print "XValBindsLR"
   pure $ concat res
-processHsLocalBinds x = do
-  print $ showSDocUnsafe $ ppr x
+processHsLocalBinds x =
   pure []
 
 processExpr :: LHsExpr GhcTc -> [Maybe String]

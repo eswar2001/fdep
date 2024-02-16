@@ -56,7 +56,7 @@ import Data.Maybe (fromJust,isJust)
 import Fdep.Types
 import Data.Aeson.Encode.Pretty (encodePretty)
 import Control.Concurrent
-
+import System.Directory
 plugin :: Plugin
 plugin = defaultPlugin {
     typeCheckResultAction = fDep
@@ -69,10 +69,13 @@ purePlugin _ = return NoForceRecompile
 fDep :: [CommandLineOption] -> ModSummary -> TcGblEnv -> TcM TcGblEnv
 fDep _ modSummary tcEnv = do
   liftIO $ forkIO $ do
+      currentDir <- getCurrentDirectory
       let moduleName' = moduleNameString $ moduleName $ ms_mod modSummary
-      let modulePath = ms_hspp_file modSummary
+      let modulePath = if "/private/tmp/" `isPrefixOf` currentDir then "/tmp/" <> ms_hspp_file modSummary else ms_hspp_file modSummary
       depsMapList <- mapM loopOverLHsBindLR $ bagToList $ tcg_binds tcEnv
-      print ("generated dependancy for module: " <> moduleName' <> " at path: " <> modulePath)
+      let path = (intercalate "/" . reverse . tail . reverse . splitOn "/") modulePath
+      print ("generated dependancy for module: " <> moduleName' <> " at path: " <> path)
+      createDirectoryIfMissing True path
       writeFile ((modulePath) <> ".json") (encodePretty $ concat depsMapList)
   return tcEnv
 

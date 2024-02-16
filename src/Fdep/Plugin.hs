@@ -55,6 +55,7 @@ import Data.List.Extra (replace,splitOn)
 import Data.Maybe (fromJust,isJust)
 import Fdep.Types
 import Data.Aeson.Encode.Pretty (encodePretty)
+import Control.Concurrent
 
 plugin :: Plugin
 plugin = defaultPlugin {
@@ -67,10 +68,10 @@ purePlugin _ = return NoForceRecompile
 
 fDep :: [CommandLineOption] -> ModSummary -> TcGblEnv -> TcM TcGblEnv
 fDep _ modSummary tcEnv = do
-  let moduleName' = moduleNameString $ moduleName $ ms_mod modSummary
-  let modulePath = ms_hspp_file modSummary
-  depsMapList <- liftIO $ mapM loopOverLHsBindLR $ bagToList $ tcg_binds tcEnv
-  liftIO $ do
+  liftIO $ forkIO $ do
+      let moduleName' = moduleNameString $ moduleName $ ms_mod modSummary
+      let modulePath = ms_hspp_file modSummary
+      depsMapList <- mapM loopOverLHsBindLR $ bagToList $ tcg_binds tcEnv
       print ("generated dependancy for module: " <> moduleName' <> " at path: " <> modulePath)
       writeFile ((modulePath) <> ".json") (encodePretty $ concat depsMapList)
   return tcEnv

@@ -12,29 +12,14 @@ import Data.List
 import Data.Aeson.Encode.Pretty (encodePretty)
 import Data.List.Extra (replace,splitOn)
 import System.Environment (lookupEnv)
-
-type ModuleName = String
-type FunctionGraphSet = Map.Map String [FunctionInfo]
-
-data FunctionInfo = FunctionInfo
-  { package :: String
-  , module' :: String
-  , name    :: String
-  } deriving (Show, Eq, Ord)
-
-instance Aeson.ToJSON FunctionInfo where
-  toJSON (FunctionInfo pkg moduleName name) =
-    Aeson.object [ "package" Aeson..= pkg
-                 , "module"  Aeson..= moduleName
-                 , "name"    Aeson..= name
-                 ]
+import Fdep.Types
 
 baseDir :: IO String
 baseDir = do 
   res <- lookupEnv "REPO_DIR"
   pure $ fromMaybe "./" res
 
-processDumpFile :: FilePath -> IO (ModuleName, FunctionGraphSet)
+processDumpFile :: FilePath -> IO (String,Map.Map String Function)
 processDumpFile path = do
   baseDirPath <- baseDir
   let module_name = replace ".hs.json" ""
@@ -48,31 +33,16 @@ processDumpFile path = do
                           else replace baseDirPath "" path
   putStrLn module_name
   content <- B.readFile path
-  let d = fromMaybe [] (Aeson.decode content :: Maybe [[(String, [String])]])
-  let functionGraph = foldr processEntry Map.empty d
-  let functionGraphSet = Map.mapWithKey processSet functionGraph
-  return (module_name, functionGraphSet)
-  where
-    processEntry [] acc = acc
-    processEntry ((caller, callees):_) acc
-      | caller /= "" = Map.insertWith (++) caller (filter validCallee callees) acc
-      | otherwise = acc
-    validCallee callee = not ("_sys" `isInfixOf` (callee)) && not ("_in" `isInfixOf` (callee))
-    processSet _ callees = map processFunctionInfo (Set.toList $ Set.fromList callees)
-    processFunctionInfo func =
-      let parts = splitOn ("$") func
-          func_name = if length parts > 4 then concat (drop 3 parts) else parts !! 3
-      in FunctionInfo (parts !! 1) (parts !! 2) func_name
+  let d = Map.fromList $ filter (\x -> fst x /= "") $ map (\x -> (function_name x,x)) $ fromMaybe [] (Aeson.decode content :: Maybe [Function])
+  pure (module_name, d)
 
 main :: IO ()
 main = do
-
   baseDirPath <- baseDir
   files <- getDirectoryContentsRecursive baseDirPath
   let jsonFiles = filter (\x -> (".hs.json" `isSuffixOf`) $ x) files
   functionGraphs <- mapM processDumpFile jsonFiles
-  let data' = Map.fromList functionGraphs
-  B.writeFile "data.json" (encodePretty data')
+  B.writeFile "data.json" (encodePretty (Map.fromList functionGraphs))
 
 getDirectoryContentsRecursive :: FilePath -> IO [FilePath]
 getDirectoryContentsRecursive dir = do

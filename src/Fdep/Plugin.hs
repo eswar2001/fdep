@@ -10,8 +10,9 @@ import Data.List (nub)
 import Debug.Trace (traceShowId)
 import GHC
   ( GRHS (..),
-    GRHSs (grhssGRHSs),
+    GRHSs (..),
     GenLocated (L),
+    HsValBinds (..),
     GhcTc,
     HsBindLR (..),
     HsConDetails (..),
@@ -32,9 +33,7 @@ import GHC
     noLoc, Module (moduleName), moduleNameString
   )
 import GHC.Hs.Binds
-  ( LHsBindLR,
-  )
-import GhcPlugins (Var (varName), getOccString, unLoc, Plugin (pluginRecompile), PluginRecompile (..))
+import GhcPlugins (Var (varName), getOccString, unLoc, Plugin (pluginRecompile), PluginRecompile (..),showSDocUnsafe,ppr)
 import HscTypes (ModSummary (..))
 import Name (nameStableString)
 import Plugins (CommandLineOption, Plugin (typeCheckResultAction), defaultPlugin)
@@ -45,6 +44,16 @@ import Data.ByteString.Lazy (writeFile)
 import System.Directory (createDirectoryIfMissing,getHomeDirectory)
 import Data.Maybe (fromMaybe)
 import Control.Exception (try,SomeException)
+import SrcLoc
+import Annotations
+import Outputable ()
+import GhcPlugins ()
+import DynFlags ()
+import Control.Monad (foldM)
+import Data.List
+import Data.List.Extra (replace,splitOn)
+import Data.Maybe (fromJust,isJust)
+import Fdep.Types
 
 plugin :: Plugin
 plugin = defaultPlugin {
@@ -62,31 +71,41 @@ fDep _ modSummary tcEnv = do
   depsMapList <- liftIO $ mapM loopOverLHsBindLR $ bagToList $ tcg_binds tcEnv
   liftIO $ do
       print ("generated dependancy for module: " <> moduleName' <> " at path: " <> modulePath)
-      writeFile ((modulePath) <> ".json") (encode depsMapList)
+      writeFile ((modulePath) <> ".json") (encode $ concat depsMapList)
   return tcEnv
 
-loopOverLHsBindLR :: LHsBindLR GhcTc GhcTc -> IO [(String, [Maybe String])]
+transformFromNameStableString :: Maybe String -> Maybe FunctionInfo
+transformFromNameStableString (Just str) =
+  let parts = splitOn ("$") str
+      func_name = if length parts > 4 then concat (drop 3 parts) else parts !! 3
+  in Just $ FunctionInfo (parts !! 1) (parts !! 2) func_name
+
+loopOverLHsBindLR :: LHsBindLR GhcTc GhcTc -> IO [Function]
 loopOverLHsBindLR (L _ (FunBind _ id matches _ _)) = do
   -- print ("FunBind" :: String)
   let funName = getOccString $ unLoc id
       matchList = mg_alts matches
-      list = map processMatch (unLoc matchList)
-  pure [(funName, concat list)]
+  (list,funcs) <- foldM (\(x,y) xx -> do
+                                  (l,f) <- processMatch xx
+                                  pure $ (x <> l,y <> f)
+                        ) ([],[]) (unLoc matchList)
+  let listTransformed = map transformFromNameStableString list
+  pure [(Function funName listTransformed funcs)]
 loopOverLHsBindLR (L _ (PatBind _ _ pat_rhs _)) = do
   -- print ("patBind" :: String)
-  let l = concatMap processGRHS $ grhssGRHSs pat_rhs
-  pure [("", l)]
+  let l = map transformFromNameStableString $ concatMap processGRHS $ grhssGRHSs pat_rhs
+  pure [(Function "" l [])]
 loopOverLHsBindLR (L _ VarBind {var_rhs = rhs}) = do
   -- print ("varBind" :: String)
-  pure [("", processExpr rhs)]
+  pure [(Function "" (map transformFromNameStableString $ processExpr rhs) [])]
 loopOverLHsBindLR (L _ AbsBinds {abs_binds = binds}) = do
   -- print ("absBind" :: String)
   list <- mapM loopOverLHsBindLR $ bagToList binds
   pure (concat list)
 loopOverLHsBindLR (L _ (PatSynBind _ PSB {psb_def = def})) = do
   -- print ("patSynBind PSB" :: String)
-  let list = map (Just . traceShowId . nameStableString) $ processPat def
-  pure [("", list)]
+  let list = map transformFromNameStableString $ map (Just . traceShowId . nameStableString) $ processPat def
+  pure [(Function "" list [])]
 loopOverLHsBindLR (L _ (PatSynBind _ (XPatSynBind _))) = do
   -- print ("patSynBind XPatSynBind" :: String)
   pure []
@@ -94,14 +113,31 @@ loopOverLHsBindLR (L _ (XHsBindsLR _)) = do
   -- print ("XHsBindsLR" :: String)
   pure []
 
-processMatch :: LMatch GhcTc (LHsExpr GhcTc) -> [Maybe String]
-processMatch (L _ match) =
+processMatch :: LMatch GhcTc (LHsExpr GhcTc) -> IO ([Maybe String],[Function])
+processMatch (L _ match) = do
   let grhss = m_grhss match
-   in concatMap processGRHS $ grhssGRHSs grhss
+  whereClause <- processHsLocalBinds $ unLoc $ grhssLocalBinds grhss
+  pure $ (concatMap processGRHS $ grhssGRHSs grhss,whereClause)
 
 processGRHS :: LGRHS GhcTc (LHsExpr GhcTc) -> [Maybe String]
 processGRHS (L _ (GRHS _ _ body)) = processExpr body
 processGRHS _ = []
+
+processHsLocalBinds :: HsLocalBindsLR GhcTc GhcTc -> IO [Function]
+processHsLocalBinds (HsValBinds _ (ValBinds _ x y)) = do
+  res <- mapM loopOverLHsBindLR $ bagToList $ x
+  -- print "ValBinds"
+  pure $ concat res
+processHsLocalBinds (HsValBinds _ (XValBindsLR (NValBinds x y))) = do
+  res <- foldM (\acc (recFlag,binds) -> do 
+                  funcs <- mapM loopOverLHsBindLR $ bagToList binds
+                  pure (acc <> funcs)
+                ) [] x
+  -- print "XValBindsLR"
+  pure $ concat res
+processHsLocalBinds x = do
+  print $ showSDocUnsafe $ ppr x
+  pure []
 
 processExpr :: LHsExpr GhcTc -> [Maybe String]
 processExpr (L _ (HsVar _ (L _ var))) =

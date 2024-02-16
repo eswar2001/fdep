@@ -22,7 +22,7 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v3
         with:
-          name: fdep
+          name: fdep-ubuntu
           path: result/bin/fdep
   
   build-mac:
@@ -37,5 +37,5 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v3
         with:
-          name: fdep
+          name: fdep-mac
           path: result/bin/fdep

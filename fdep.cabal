@@ -34,7 +34,7 @@ common common-options
 
 library
     import: common-options
-    exposed-modules:  Fdep.Plugin Fdep.Types
+    exposed-modules:  Fdep.Plugin Fdep.Types Fdep.Group
     build-depends:
                 bytestring
                 , containers
@@ -55,28 +55,16 @@ library
 executable fdep
     import:           common-options
     main-is:          Main.hs
-    build-depends:
-        , aeson
-        , directory
-        , bytestring
-        , filepath
-        , containers
-        , extra
-        , aeson-pretty
-        , fdep
+    build-depends: fdep
     hs-source-dirs:   app
     default-language: Haskell2010
 
 test-suite fdep-test
     import:           common-options
-
     default-language: Haskell2010
     type:             exitcode-stdio-1.0
-
     hs-source-dirs:   test
-
     main-is:          Main.hs
-
     build-depends:
         fdep
     ghc-options: -fplugin=Fdep.Plugin

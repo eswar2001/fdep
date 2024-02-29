@@ -42,7 +42,7 @@ run = do
   files <- getDirectoryContentsRecursive baseDirPath
   let jsonFiles = filter (\x -> (".hs.json" `isSuffixOf`) $ x) files
   functionGraphs <- mapM processDumpFile jsonFiles
-  B.writeFile "data.json" (encodePretty (Map.fromList functionGraphs))
+  B.writeFile (baseDirPath <> "data.json") (encodePretty (Map.fromList functionGraphs))
 
 getDirectoryContentsRecursive :: FilePath -> IO [FilePath]
 getDirectoryContentsRecursive dir = do

@@ -69,13 +69,12 @@ purePlugin _ = return NoForceRecompile
 fDep :: [CommandLineOption] -> ModSummary -> TcGblEnv -> TcM TcGblEnv
 fDep _ modSummary tcEnv = do
   liftIO $ forkIO $ do
-      currentDir <- getCurrentDirectory
+      currentDir <- getHomeDirectory
       let moduleName' = moduleNameString $ moduleName $ ms_mod modSummary
-      let modulePath = if ("nix-build" `isInfixOf` currentDir || "/build/" `isInfixOf` currentDir) then "/tmp/" <> ms_hspp_file modSummary else ms_hspp_file modSummary
+      let modulePath = currentDir <> "/fdep/" <> ms_hspp_file modSummary
       depsMapList <- mapM loopOverLHsBindLR $ bagToList $ tcg_binds tcEnv
       let path = (intercalate "/" . reverse . tail . reverse . splitOn "/") modulePath
       print ("generated dependancy for module: " <> moduleName' <> " at path: " <> path)
-      print ("writing dump at: " <> modulePath)
       createDirectoryIfMissing True path
       writeFile ((modulePath) <> ".json") (encodePretty $ concat depsMapList)
   return tcEnv

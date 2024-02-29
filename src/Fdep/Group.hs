@@ -38,7 +38,8 @@ processDumpFile path = do
 
 run :: IO ()
 run = do
-  baseDirPath <- baseDir
+  currentDir <- getHomeDirectory
+  let baseDirPath = currentDir <> "/fdep/"
   files <- getDirectoryContentsRecursive baseDirPath
   let jsonFiles = filter (\x -> (".hs.json" `isSuffixOf`) $ x) files
   functionGraphs <- mapM processDumpFile jsonFiles

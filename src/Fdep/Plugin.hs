@@ -75,6 +75,7 @@ fDep _ modSummary tcEnv = do
       depsMapList <- mapM loopOverLHsBindLR $ bagToList $ tcg_binds tcEnv
       let path = (intercalate "/" . reverse . tail . reverse . splitOn "/") modulePath
       print ("generated dependancy for module: " <> moduleName' <> " at path: " <> path)
+      print ("writing dump at: " <> modulePath)
       createDirectoryIfMissing True path
       writeFile ((modulePath) <> ".json") (encodePretty $ concat depsMapList)
   return tcEnv

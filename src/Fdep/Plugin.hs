@@ -30,7 +30,7 @@ import GHC
     Name,
     Pat (..),
     PatSynBind (..),
-    noLoc, Module (moduleName), moduleNameString,Id(..),getName,nameSrcSpan
+    noLoc, Module (moduleName), moduleNameString,Id(..),getName,nameSrcSpan,IdP(..),GhcPass
   )
 import GHC.Hs.Binds
 import GhcPlugins (idName,Var (varName), getOccString, unLoc, Plugin (pluginRecompile), PluginRecompile (..),showSDocUnsafe,ppr,elemNameSet,pprPrefixName,idType,tidyOpenType)
@@ -62,6 +62,8 @@ import Avail
 import TcEnv
 import GHC.Hs.Utils as GHCHs
 import TyCoPpr ( pprUserForAll, pprTypeApp, pprSigmaType )
+import Data.Bool (bool)
+import qualified Data.Map as Map
 
 plugin :: Plugin
 plugin = defaultPlugin {
@@ -73,39 +75,61 @@ purePlugin :: [CommandLineOption] -> IO PluginRecompile
 purePlugin _ = return NoForceRecompile
 
 fDep :: [CommandLineOption] -> ModSummary -> TcGblEnv -> TcM TcGblEnv
-fDep _ modSummary tcEnv = do
+fDep opts modSummary tcEnv = do
   liftIO $ forkIO $ do
-      let moduleName' = moduleNameString $ moduleName $ ms_mod modSummary
-      let modulePath = "/tmp/fdep/" <> ms_hspp_file modSummary
+      let prefixPath = case opts of
+                            []    -> "/tmp/fdep/"
+                            local : _ -> local
+          moduleName' = moduleNameString $ moduleName $ ms_mod modSummary
+          modulePath = prefixPath <> ms_hspp_file modSummary
       depsMapList <- mapM loopOverLHsBindLR $ bagToList $ tcg_binds tcEnv
       let path = (intercalate "/" . reverse . tail . reverse . splitOn "/") modulePath
       print ("generated dependancy for module: " <> moduleName' <> " at path: " <> path)
       createDirectoryIfMissing True path
       writeFile ((modulePath) <> ".json") (encodePretty $ concat depsMapList)
-      writeFile ((modulePath) <> ".missing.signatures.json") (encodePretty $ dumpMissingTypeSignatures tcEnv)
+      writeFile ((modulePath) <> ".missing.signatures.json") $
+        encodePretty
+          $ Map.fromList
+            $ map (\element -> (\(x,y) -> (x,typeSignature y)) $ filterForMaxLenTypSig element)
+              $ groupBy (\a b -> (srcSpan a) == (srcSpan b))
+                $ dumpMissingTypeSignatures tcEnv
   return tcEnv
+    where
+      filterForMaxLenTypSig :: [MissingTopLevelBindsSignature] -> (String, MissingTopLevelBindsSignature)
+      filterForMaxLenTypSig x =
+          case x of
+            [el] -> (srcSpan $ el,el)
+            [el1,el2] -> (srcSpan el1,bool (el2) (el1) ((length $ typeSignature $ el1) > (length $ typeSignature $ el2)))
+            (xx:xs) -> (\(y,yy) -> (srcSpan xx,bool (yy) (xx) ((length $ typeSignature $ xx) > (length $ typeSignature $ yy)))) $ filterForMaxLenTypSig xs
+
 
 dumpMissingTypeSignatures :: TcGblEnv -> [MissingTopLevelBindsSignature]
 dumpMissingTypeSignatures gbl_env =
-  let binds    = GHCHs.collectHsBindsBinders $ tcg_binds gbl_env
-  in mapMaybe add_bind_warn binds
+  let binds    =  ((bagToList $ tcg_binds $ gbl_env) ^? biplateRef :: [IdP (GhcTc)])
+      whereBinds  = concatMap (\x -> ((processHsLocalBindsForWhereFunctions $ unLoc $ processMatchForWhereFunctions x) ^? biplateRef :: [IdP (GhcTc)]))  ((bagToList $ tcg_binds $ gbl_env) ^? biplateRef :: [LMatch GhcTc (LHsExpr GhcTc)])
+  in nub $ mapMaybe add_bind_warn (binds <> whereBinds)
   where
     add_bind_warn :: Id -> Maybe MissingTopLevelBindsSignature
     add_bind_warn id
       = let name    = idName id
             ty = (idType id)
             ty_msg  = pprSigmaType ty
-        in add_warn name (showSDocUnsafe $ pprPrefixName name) (showSDocUnsafe $ ppr $ ty_msg)
+        in add_warn (showSDocUnsafe $ ppr $ nameSrcSpan $ getName name) (showSDocUnsafe $ pprPrefixName name) (showSDocUnsafe $ ppr $ ty_msg)
 
+    add_warn "<no location info>" msg ty_msg = Nothing
+    add_warn _ msg "*" = Nothing
     add_warn name msg ty_msg
-      = if (name `elemNameSet` (tcg_sigs gbl_env) && export_check name)
-          then Just $ MissingTopLevelBindsSignature { srcSpan = (showSDocUnsafe $ ppr $ nameSrcSpan $ getName name), typeSignature = (msg <> " :: " <> ty_msg)}
-          else Nothing
+      = if "$" `isPrefixOf` msg
+          then Nothing
+          else Just $ MissingTopLevelBindsSignature { srcSpan = (name), typeSignature = (msg <> " :: " <> ty_msg)}
 
-    export_check name
-      = name `elemNameSet` (availsToNameSet (tcg_exports gbl_env))
+    processMatchForWhereFunctions :: LMatch GhcTc (LHsExpr GhcTc) -> LHsLocalBinds GhcTc
+    processMatchForWhereFunctions (L _ match) = (grhssLocalBinds (m_grhss match))
 
--- reason loc msg
+    processHsLocalBindsForWhereFunctions :: HsLocalBindsLR GhcTc GhcTc -> [LHsBindLR GhcTc GhcTc]
+    processHsLocalBindsForWhereFunctions (HsValBinds _ (ValBinds _ x _)) = bagToList $ x
+    processHsLocalBindsForWhereFunctions (HsValBinds _ (XValBindsLR (NValBinds x y))) = concatMap (\(recFlag,binds) -> bagToList binds ) x
+    processHsLocalBindsForWhereFunctions x = []
 
 transformFromNameStableString :: Maybe String -> Maybe FunctionInfo
 transformFromNameStableString (Just str) =
@@ -140,9 +164,8 @@ loopOverLHsBindLR (L _ (XHsBindsLR _)) = do
 
 processMatch :: LMatch GhcTc (LHsExpr GhcTc) -> IO ([Maybe String],[Function])
 processMatch (L _ match) = do
-  let grhss = m_grhss match
-  whereClause <- processHsLocalBinds $ unLoc $ grhssLocalBinds grhss
-  pure $ (concatMap processGRHS $ grhssGRHSs grhss,whereClause)
+  whereClause <- processHsLocalBinds $ unLoc $ grhssLocalBinds (m_grhss match)
+  pure $ (concatMap processGRHS $ grhssGRHSs (m_grhss match),whereClause)
 
 processGRHS :: LGRHS GhcTc (LHsExpr GhcTc) -> [Maybe String]
 processGRHS (L _ (GRHS _ _ body)) = processExpr body

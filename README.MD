@@ -9,7 +9,7 @@ This Haskell plugin automatically generates function call graphs for Haskell pac
 
 Add this to your ghc-options in cabal and mention fdep it in build-depends
 
-
+Use this when using through nix build
 ```
 -fplugin=Fdep.Plugin
 ```
@@ -17,5 +17,5 @@ Add this to your ghc-options in cabal and mention fdep it in build-depends
 Note: use this when using with cabal 
 
 ```
--fplugin-opt Fdep.Plugin:./tmp/fdep/
+-fplugin=Fdep.Plugin -fplugin-opt Fdep.Plugin:./tmp/fdep/
 ```

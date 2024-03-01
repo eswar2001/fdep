@@ -2,7 +2,7 @@
 
 module Fdep.Plugin (plugin) where
 
-import Bag (bagToList)
+import Bag (bagToList,listToBag)
 import Control.Monad.IO.Class (MonadIO (..))
 import Control.Reference (biplateRef, (^?))
 import Data.Generics.Uniplate.Data ()
@@ -102,11 +102,10 @@ fDep opts modSummary tcEnv = do
             [el1,el2] -> (srcSpan el1,bool (el2) (el1) ((length $ typeSignature $ el1) > (length $ typeSignature $ el2)))
             (xx:xs) -> (\(y,yy) -> (srcSpan xx,bool (yy) (xx) ((length $ typeSignature $ xx) > (length $ typeSignature $ yy)))) $ filterForMaxLenTypSig xs
 
-
 dumpMissingTypeSignatures :: TcGblEnv -> [MissingTopLevelBindsSignature]
 dumpMissingTypeSignatures gbl_env =
-  let binds    =  ((bagToList $ tcg_binds $ gbl_env) ^? biplateRef :: [IdP (GhcTc)])
-      whereBinds  = concatMap (\x -> ((processHsLocalBindsForWhereFunctions $ unLoc $ processMatchForWhereFunctions x) ^? biplateRef :: [IdP (GhcTc)]))  ((bagToList $ tcg_binds $ gbl_env) ^? biplateRef :: [LMatch GhcTc (LHsExpr GhcTc)])
+  let binds    =  (collectHsBindsBinders $ tcg_binds $ gbl_env)
+      whereBinds  = concatMap (\x -> ((concatMap collectHsBindsBinders $ processHsLocalBindsForWhereFunctions $ unLoc $ processMatchForWhereFunctions x)))  ((bagToList $ tcg_binds $ gbl_env) ^? biplateRef :: [LMatch GhcTc (LHsExpr GhcTc)])
   in nub $ mapMaybe add_bind_warn (binds <> whereBinds)
   where
     add_bind_warn :: Id -> Maybe MissingTopLevelBindsSignature
@@ -117,7 +116,10 @@ dumpMissingTypeSignatures gbl_env =
         in add_warn (showSDocUnsafe $ ppr $ nameSrcSpan $ getName name) (showSDocUnsafe $ pprPrefixName name) (showSDocUnsafe $ ppr $ ty_msg)
 
     add_warn "<no location info>" msg ty_msg = Nothing
+    add_warn "<wired into compiler>" msg ty_msg = Nothing
     add_warn _ msg "*" = Nothing
+    add_warn _ msg "* -> *" = Nothing
+    add_warn _ msg ('_':xs) = Nothing
     add_warn name msg ty_msg
       = if "$" `isPrefixOf` msg
           then Nothing
@@ -126,9 +128,9 @@ dumpMissingTypeSignatures gbl_env =
     processMatchForWhereFunctions :: LMatch GhcTc (LHsExpr GhcTc) -> LHsLocalBinds GhcTc
     processMatchForWhereFunctions (L _ match) = (grhssLocalBinds (m_grhss match))
 
-    processHsLocalBindsForWhereFunctions :: HsLocalBindsLR GhcTc GhcTc -> [LHsBindLR GhcTc GhcTc]
-    processHsLocalBindsForWhereFunctions (HsValBinds _ (ValBinds _ x _)) = bagToList $ x
-    processHsLocalBindsForWhereFunctions (HsValBinds _ (XValBindsLR (NValBinds x y))) = concatMap (\(recFlag,binds) -> bagToList binds ) x
+    processHsLocalBindsForWhereFunctions :: HsLocalBindsLR GhcTc GhcTc -> [LHsBindsLR GhcTc GhcTc]
+    processHsLocalBindsForWhereFunctions (HsValBinds _ (ValBinds _ x _)) = [x]
+    processHsLocalBindsForWhereFunctions (HsValBinds _ (XValBindsLR (NValBinds x _))) = map (\(_,binds) -> binds) $ x
     processHsLocalBindsForWhereFunctions x = []
 
 transformFromNameStableString :: Maybe String -> Maybe FunctionInfo

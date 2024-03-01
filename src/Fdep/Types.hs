@@ -13,6 +13,17 @@ data Function = Function
   , where_functions :: [Function]
   } deriving (Show, Eq, Ord)
 
+data MissingTopLevelBindsSignature = MissingTopLevelBindsSignature {
+  srcSpan :: String
+  , typeSignature :: String
+} deriving (Show, Eq, Ord)
+
+instance ToJSON MissingTopLevelBindsSignature where
+  toJSON (MissingTopLevelBindsSignature srcSpan typeSignature) =
+    object [ "srcSpan" .= srcSpan
+           , "typeSignature"  .= typeSignature
+           ]
+
 instance ToJSON FunctionInfo where
   toJSON (FunctionInfo pkg modName funcName) =
     object [ "package_name" .= pkg

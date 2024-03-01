@@ -30,10 +30,10 @@ import GHC
     Name,
     Pat (..),
     PatSynBind (..),
-    noLoc, Module (moduleName), moduleNameString
+    noLoc, Module (moduleName), moduleNameString,Id(..),getName,nameSrcSpan
   )
 import GHC.Hs.Binds
-import GhcPlugins (Var (varName), getOccString, unLoc, Plugin (pluginRecompile), PluginRecompile (..),showSDocUnsafe,ppr)
+import GhcPlugins (idName,Var (varName), getOccString, unLoc, Plugin (pluginRecompile), PluginRecompile (..),showSDocUnsafe,ppr,elemNameSet,pprPrefixName,idType,tidyOpenType)
 import HscTypes (ModSummary (..))
 import Name (nameStableString)
 import Plugins (CommandLineOption, Plugin (typeCheckResultAction), defaultPlugin)
@@ -49,14 +49,20 @@ import Annotations
 import Outputable ()
 import GhcPlugins ()
 import DynFlags ()
-import Control.Monad (foldM)
+import Control.Monad (foldM,when)
 import Data.List
 import Data.List.Extra (replace,splitOn)
-import Data.Maybe (fromJust,isJust)
+import Data.Maybe (fromJust,isJust,mapMaybe)
 import Fdep.Types
 import Data.Aeson.Encode.Pretty (encodePretty)
 import Control.Concurrent
 import System.Directory
+import PatSyn
+import Avail
+import TcEnv
+import GHC.Hs.Utils as GHCHs
+import TyCoPpr ( pprUserForAll, pprTypeApp, pprSigmaType )
+
 plugin :: Plugin
 plugin = defaultPlugin {
     typeCheckResultAction = fDep
@@ -76,7 +82,30 @@ fDep _ modSummary tcEnv = do
       print ("generated dependancy for module: " <> moduleName' <> " at path: " <> path)
       createDirectoryIfMissing True path
       writeFile ((modulePath) <> ".json") (encodePretty $ concat depsMapList)
+      writeFile ((modulePath) <> ".missing.signatures.json") (encodePretty $ dumpMissingTypeSignatures tcEnv)
   return tcEnv
+
+dumpMissingTypeSignatures :: TcGblEnv -> [MissingTopLevelBindsSignature]
+dumpMissingTypeSignatures gbl_env =
+  let binds    = GHCHs.collectHsBindsBinders $ tcg_binds gbl_env
+  in mapMaybe add_bind_warn binds
+  where
+    add_bind_warn :: Id -> Maybe MissingTopLevelBindsSignature
+    add_bind_warn id
+      = let name    = idName id
+            ty = (idType id)
+            ty_msg  = pprSigmaType ty
+        in add_warn name (showSDocUnsafe $ pprPrefixName name) (showSDocUnsafe $ ppr $ ty_msg)
+
+    add_warn name msg ty_msg
+      = if (name `elemNameSet` (tcg_sigs gbl_env) && export_check name)
+          then Just $ MissingTopLevelBindsSignature { srcSpan = (showSDocUnsafe $ ppr $ nameSrcSpan $ getName name), typeSignature = (msg <> " :: " <> ty_msg)}
+          else Nothing
+
+    export_check name
+      = name `elemNameSet` (availsToNameSet (tcg_exports gbl_env))
+
+-- reason loc msg
 
 transformFromNameStableString :: Maybe String -> Maybe FunctionInfo
 transformFromNameStableString (Just str) =

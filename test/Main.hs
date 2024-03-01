@@ -1,9 +1,9 @@
 {-# LANGUAGE RankNTypes #-}
-module Main (main) where
+module Main (main,demo) where
 
 import qualified Fdep.Plugin ()
 
-main :: IO ()
+-- main :: IO ()
 main = do
     putStrLn "Test suite not yet implemented."
     print ("HI there" :: String)
@@ -13,4 +13,4 @@ main = do
         test2 "HI" = "HI"
         test10 = demo
 
-demo = 100
+demo "HI" = 100

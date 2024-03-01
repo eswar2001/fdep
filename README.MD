@@ -13,3 +13,9 @@ Add this to your ghc-options in cabal and mention fdep it in build-depends
 ```
 -fplugin=Fdep.Plugin
 ```
+
+Note: use this when using with cabal 
+
+```
+-fplugin-opt Fdep.Plugin:./tmp/fdep/
+```

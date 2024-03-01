@@ -14,7 +14,7 @@ Use this when using through nix build
 -fplugin=Fdep.Plugin
 ```
 
-Note: use this when using with cabal 
+use this when using with cabal 
 
 ```
 -fplugin=Fdep.Plugin -fplugin-opt Fdep.Plugin:./tmp/fdep/

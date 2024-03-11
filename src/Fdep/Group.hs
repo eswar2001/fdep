@@ -14,14 +14,9 @@ import Data.List.Extra (replace,splitOn)
 import System.Environment (lookupEnv)
 import Fdep.Types
 
-baseDir :: IO String
-baseDir = do 
-  res <- lookupEnv "REPO_DIR"
-  pure $ fromMaybe "./" res
 
-processDumpFile :: FilePath -> IO (String,Map.Map String Function)
-processDumpFile path = do
-  baseDirPath <- baseDir
+processDumpFile :: String -> FilePath -> IO (String,Map.Map String Function)
+processDumpFile baseDirPath path = do
   let module_name = replace ".hs.json" ""
                       $ replace "/" "."
                         $ if (("src/")) `isInfixOf` (path)
@@ -36,12 +31,15 @@ processDumpFile path = do
   let d = Map.fromList $ filter (\x -> fst x /= "") $ map (\x -> (function_name x,x)) $ fromMaybe [] (Aeson.decode content :: Maybe [Function])
   pure (module_name, d)
 
-run :: IO ()
-run = do
-  let baseDirPath = "/tmp/fdep/"
+run :: Maybe String -> IO ()
+run bPath = do
+  let baseDirPath =
+        case bPath of
+            Just val -> val
+            _ -> "/tmp/fdep/"
   files <- getDirectoryContentsRecursive baseDirPath
   let jsonFiles = filter (\x -> (".hs.json" `isSuffixOf`) $ x) files
-  functionGraphs <- mapM processDumpFile jsonFiles
+  functionGraphs <- mapM (processDumpFile baseDirPath) jsonFiles
   B.writeFile (baseDirPath <> "data.json") (encodePretty (Map.fromList functionGraphs))
 
 getDirectoryContentsRecursive :: FilePath -> IO [FilePath]

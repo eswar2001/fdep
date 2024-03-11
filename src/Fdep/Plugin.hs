@@ -133,10 +133,10 @@ dumpMissingTypeSignatures gbl_env =
     processHsLocalBindsForWhereFunctions (HsValBinds _ (XValBindsLR (NValBinds x _))) = map (\(_,binds) -> binds) $ x
     processHsLocalBindsForWhereFunctions x = []
 
-transformFromNameStableString :: Maybe String -> Maybe FunctionInfo
-transformFromNameStableString (Just str) =
+transformFromNameStableString :: (Maybe String,Maybe String) -> Maybe FunctionInfo
+transformFromNameStableString (Just str,Just loc) =
   let parts = filter (\x -> x /= "") $ splitOn ("$") str
-  in Just $ if length parts == 2 then  FunctionInfo "" (parts !! 0) (parts !! 1) else FunctionInfo (parts !! 0) (parts !! 1) (parts !! 2)
+  in Just $ if length parts == 2 then  FunctionInfo "" (parts !! 0) (parts !! 1) loc else FunctionInfo (parts !! 0) (parts !! 1) (parts !! 2) loc
 
 loopOverLHsBindLR :: LHsBindLR GhcTc GhcTc -> IO [Function]
 loopOverLHsBindLR (L _ (FunBind _ id matches _ _)) = do
@@ -147,29 +147,29 @@ loopOverLHsBindLR (L _ (FunBind _ id matches _ _)) = do
                                   pure $ (x <> l,y <> f)
                         ) ([],[]) (unLoc matchList)
   let listTransformed = map transformFromNameStableString $ nub $ list
-  pure [(Function funName listTransformed (nub funcs))]
+  pure [(Function funName listTransformed (nub funcs) (showSDocUnsafe $ ppr $ getLoc id))]
 loopOverLHsBindLR (L _ (PatBind _ _ pat_rhs _)) = do
   let l = map transformFromNameStableString $ concatMap processGRHS $ grhssGRHSs pat_rhs
-  pure [(Function "" l [])]
+  pure [(Function "" l [] "")]
 loopOverLHsBindLR (L _ VarBind {var_rhs = rhs}) = do
-  pure [(Function "" (map transformFromNameStableString $ processExpr rhs) [])]
+  pure [(Function "" (map transformFromNameStableString $ processExpr rhs) [] "")]
 loopOverLHsBindLR (L _ AbsBinds {abs_binds = binds}) = do
   list <- mapM loopOverLHsBindLR $ bagToList binds
   pure (concat list)
 loopOverLHsBindLR (L _ (PatSynBind _ PSB {psb_def = def})) = do
-  let list = map transformFromNameStableString $ map (Just . traceShowId . nameStableString) $ processPat def
-  pure [(Function "" list [])]
+  let list = map transformFromNameStableString $ map (\(n,srcLoc) -> (Just $ traceShowId $ nameStableString n, srcLoc)) $ processPat def
+  pure [(Function "" list [] "")]
 loopOverLHsBindLR (L _ (PatSynBind _ (XPatSynBind _))) = do
   pure []
 loopOverLHsBindLR (L _ (XHsBindsLR _)) = do
   pure []
 
-processMatch :: LMatch GhcTc (LHsExpr GhcTc) -> IO ([Maybe String],[Function])
+processMatch :: LMatch GhcTc (LHsExpr GhcTc) -> IO ([(Maybe String,Maybe String)],[Function])
 processMatch (L _ match) = do
   whereClause <- processHsLocalBinds $ unLoc $ grhssLocalBinds (m_grhss match)
   pure $ (concatMap processGRHS $ grhssGRHSs (m_grhss match),whereClause)
 
-processGRHS :: LGRHS GhcTc (LHsExpr GhcTc) -> [Maybe String]
+processGRHS :: LGRHS GhcTc (LHsExpr GhcTc) -> [(Maybe String,Maybe String)]
 processGRHS (L _ (GRHS _ _ body)) = processExpr body
 processGRHS _ = []
 
@@ -186,10 +186,10 @@ processHsLocalBinds (HsValBinds _ (XValBindsLR (NValBinds x y))) = do
 processHsLocalBinds x =
   pure []
 
-processExpr :: LHsExpr GhcTc -> [Maybe String]
-processExpr (L _ (HsVar _ (L _ var))) =
+processExpr :: LHsExpr GhcTc -> [(Maybe String,Maybe String)]
+processExpr x@(L _ (HsVar _ (L _ var))) =
   let name = nameStableString $ varName var
-   in [Just name]
+  in [(Just name,Just $ showSDocUnsafe $ ppr $ getLoc $ x)]
 processExpr (L _ (HsUnboundVar _ _)) = []
 processExpr (L _ (HsApp _ funl funr)) =
   processExpr funl <> processExpr funr
@@ -277,20 +277,20 @@ processExpr (L _ (HsTcBracketOut _ exprLStmtL exprLStmtR)) =
 -- HsConLikeOut (XConLikeOut p) ConLike
 processExpr _ = []
 
-extractLHsRecUpdField :: GenLocated l (HsRecField' id (LHsExpr GhcTc)) -> [Maybe String]
+extractLHsRecUpdField :: GenLocated l (HsRecField' id (LHsExpr GhcTc)) -> [(Maybe String,Maybe String)]
 extractLHsRecUpdField (L _ (HsRecField _ fun _)) = processExpr fun
 
-processPat :: LPat GhcTc -> [Name]
+processPat :: LPat GhcTc -> [(Name,Maybe String)]
 processPat (L _ pat) = case pat of
   ConPatIn _ details -> processDetails details
-  VarPat _ (L _ var) -> [varName var]
+  VarPat _ x@(L _ var) -> [(varName var,Just $ showSDocUnsafe $ ppr $ getLoc $ x)]
   ParPat _ pat' -> processPat pat'
   _ -> []
 
-processDetails :: HsConPatDetails GhcTc -> [Name]
+processDetails :: HsConPatDetails GhcTc -> [(Name,Maybe String)]
 processDetails (PrefixCon args) = concatMap processPat args
 processDetails (InfixCon arg1 arg2) = processPat arg1 <> processPat arg2
 processDetails (RecCon rec) = concatMap processPatField (rec_flds rec)
 
-processPatField :: LHsRecField GhcTc (LPat GhcTc) -> [Name]
+processPatField :: LHsRecField GhcTc (LPat GhcTc) -> [(Name,Maybe String)]
 processPatField (L _ HsRecField {hsRecFieldArg = arg}) = processPat arg

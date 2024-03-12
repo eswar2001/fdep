@@ -47,7 +47,7 @@ instance FromJSON FunctionInfo where
     FunctionInfo <$> v .: "package_name"
                  <*> v .: "module_name"
                  <*> v .: "name"
-                 <*> v .: "src_Loc"
+                 <*> v .: "src_loc"
 
 instance FromJSON Function where
   parseJSON = withObject "Function" $ \v ->

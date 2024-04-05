@@ -1,4 +1,4 @@
-{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DataKinds,ViewPatterns,FlexibleContexts,TypeFamilies #-}
 
 module Fdep.Plugin (plugin) where
 
@@ -7,10 +7,10 @@ import Control.Monad.IO.Class (MonadIO (..))
 import Control.Reference (biplateRef, (^?))
 import Data.Generics.Uniplate.Data ()
 import Data.List (nub)
-import Debug.Trace (traceShowId)
 import GHC
   ( GRHS (..),
     GRHSs (..),
+    OutputableBndrId,
     GenLocated (L),
     HsValBinds (..),
     GhcTc,
@@ -33,7 +33,7 @@ import GHC
     noLoc, Module (moduleName), moduleNameString,Id(..),getName,nameSrcSpan,IdP(..),GhcPass
   )
 import GHC.Hs.Binds
-import GhcPlugins (idName,Var (varName), getOccString, unLoc, Plugin (pluginRecompile), PluginRecompile (..),showSDocUnsafe,ppr,elemNameSet,pprPrefixName,idType,tidyOpenType)
+import GhcPlugins (pprPrefixOcc,idName,Var (varName), getOccString, unLoc, Plugin (pluginRecompile), PluginRecompile (..),showSDocUnsafe,ppr,elemNameSet,pprPrefixName,idType,tidyOpenType)
 import HscTypes (ModSummary (..))
 import Name (nameStableString)
 import Plugins (CommandLineOption, Plugin (typeCheckResultAction), defaultPlugin)
@@ -42,7 +42,7 @@ import Prelude hiding (id,writeFile)
 import Data.Aeson
 import Data.ByteString.Lazy (writeFile)
 import System.Directory (createDirectoryIfMissing,getHomeDirectory)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe,catMaybes)
 import Control.Exception (try,SomeException)
 import SrcLoc
 import Annotations
@@ -64,6 +64,8 @@ import GHC.Hs.Utils as GHCHs
 import TyCoPpr ( pprUserForAll, pprTypeApp, pprSigmaType )
 import Data.Bool (bool)
 import qualified Data.Map as Map
+import Data.Data (toConstr)
+import GHC.Hs.Expr (unboundVarOcc)
 
 plugin :: Plugin
 plugin = defaultPlugin {
@@ -133,10 +135,15 @@ dumpMissingTypeSignatures gbl_env =
     processHsLocalBindsForWhereFunctions (HsValBinds _ (XValBindsLR (NValBinds x _))) = map (\(_,binds) -> binds) $ x
     processHsLocalBindsForWhereFunctions x = []
 
-transformFromNameStableString :: (Maybe String,Maybe String) -> Maybe FunctionInfo
-transformFromNameStableString (Just str,Just loc) =
+transformFromNameStableString :: (Maybe String,Maybe String,[String]) -> Maybe FunctionInfo
+transformFromNameStableString (Just str,Just loc,args) =
   let parts = filter (\x -> x /= "") $ splitOn ("$") str
-  in Just $ if length parts == 2 then  FunctionInfo "" (parts !! 0) (parts !! 1) loc else FunctionInfo (parts !! 0) (parts !! 1) (parts !! 2) loc
+  in Just $ if length parts == 2 then  FunctionInfo "" (parts !! 0) (parts !! 1) loc args else FunctionInfo (parts !! 0) (parts !! 1) (parts !! 2) loc args
+
+filterFunctionInfos :: [Maybe FunctionInfo] -> [FunctionInfo]
+filterFunctionInfos infos =
+    let grouped = groupBy (\info1 info2 -> src_Loc info1 == src_Loc info2 && name info1 == name info2) $ catMaybes infos
+    in concat $ map (\group -> concat $ map (\x -> if (null $ arguments x) then [] else [x]) group) grouped
 
 loopOverLHsBindLR :: LHsBindLR GhcTc GhcTc -> IO [Function]
 loopOverLHsBindLR (L _ (FunBind _ id matches _ _)) = do
@@ -146,31 +153,33 @@ loopOverLHsBindLR (L _ (FunBind _ id matches _ _)) = do
                                   (l,f) <- processMatch xx
                                   pure $ (x <> l,y <> f)
                         ) ([],[]) (unLoc matchList)
-  let listTransformed = map transformFromNameStableString $ nub $ list
+  let listTransformed = map (\x -> Just x) $ filterFunctionInfos $ map transformFromNameStableString list
   pure [(Function funName listTransformed (nub funcs) (showSDocUnsafe $ ppr $ getLoc id))]
 loopOverLHsBindLR (L _ (PatBind _ _ pat_rhs _)) = do
   let l = map transformFromNameStableString $ concatMap processGRHS $ grhssGRHSs pat_rhs
   pure [(Function "" l [] "")]
 loopOverLHsBindLR (L _ VarBind {var_rhs = rhs}) = do
-  pure [(Function "" (map transformFromNameStableString $ processExpr rhs) [] "")]
+  pure [(Function "" (map transformFromNameStableString $ processExpr [] rhs) [] "")]
 loopOverLHsBindLR (L _ AbsBinds {abs_binds = binds}) = do
   list <- mapM loopOverLHsBindLR $ bagToList binds
   pure (concat list)
 loopOverLHsBindLR (L _ (PatSynBind _ PSB {psb_def = def})) = do
-  let list = map transformFromNameStableString $ map (\(n,srcLoc) -> (Just $ traceShowId $ nameStableString n, srcLoc)) $ processPat def
+  let list = map transformFromNameStableString $ map (\(n,srcLoc) -> (Just $ nameStableString n, srcLoc,[])) $ processPat def
   pure [(Function "" list [] "")]
 loopOverLHsBindLR (L _ (PatSynBind _ (XPatSynBind _))) = do
   pure []
 loopOverLHsBindLR (L _ (XHsBindsLR _)) = do
   pure []
 
-processMatch :: LMatch GhcTc (LHsExpr GhcTc) -> IO ([(Maybe String,Maybe String)],[Function])
+processMatch :: LMatch GhcTc (LHsExpr GhcTc) -> IO ([(Maybe String,Maybe String,[String])],[Function])
 processMatch (L _ match) = do
   whereClause <- processHsLocalBinds $ unLoc $ grhssLocalBinds (m_grhss match)
   pure $ (concatMap processGRHS $ grhssGRHSs (m_grhss match),whereClause)
 
-processGRHS :: LGRHS GhcTc (LHsExpr GhcTc) -> [(Maybe String,Maybe String)]
-processGRHS (L _ (GRHS _ _ body)) = processExpr body
+processGRHS :: LGRHS GhcTc (LHsExpr GhcTc) -> [(Maybe String,Maybe String,[String])]
+processGRHS (L _ (GRHS _ _ body)) = 
+    let r = processExpr [] body
+    in r
 processGRHS _ = []
 
 processHsLocalBinds :: HsLocalBindsLR GhcTc GhcTc -> IO [Function]
@@ -186,99 +195,164 @@ processHsLocalBinds (HsValBinds _ (XValBindsLR (NValBinds x y))) = do
 processHsLocalBinds x =
   pure []
 
-processExpr :: LHsExpr GhcTc -> [(Maybe String,Maybe String)]
-processExpr x@(L _ (HsVar _ (L _ var))) =
+processArgs (funr) = case funr of
+                (HsUnboundVar _ uv) -> [showSDocUnsafe $ pprPrefixOcc (unboundVarOcc uv)]
+                (HsConLikeOut _ c)  -> [showSDocUnsafe $ pprPrefixOcc c]
+                (HsIPVar _ v)       -> [showSDocUnsafe $ ppr v]
+                (HsOverLabel _ _ l) -> [showSDocUnsafe $ ppr l]
+                (HsLit _ lit)       -> [showSDocUnsafe $ ppr lit]
+                (HsOverLit _ lit)   -> [showSDocUnsafe $ ppr lit]
+                (HsPar _ e)         -> [showSDocUnsafe $ ppr e]
+                (HsApp _ funl funr) -> processArgs (unLoc funr) <> processArgs (unLoc funl)
+                _ -> []
+
+processExpr :: [String] -> LHsExpr GhcTc -> [(Maybe String,Maybe String,[String])]
+processExpr arguments x@(L _ (HsVar _ (L _ var))) =
   let name = nameStableString $ varName var
-  in [(Just name,Just $ showSDocUnsafe $ ppr $ getLoc $ x)]
-processExpr (L _ (HsUnboundVar _ _)) = []
-processExpr (L _ (HsApp _ funl funr)) =
-  processExpr funl <> processExpr funr
-processExpr (L _ (OpApp _ funl funm funr)) =
-  processExpr funl <> processExpr funm <> processExpr funr
-processExpr (L _ (NegApp _ funl _)) =
-  processExpr funl
-processExpr (L _ (HsTick _ _ fun)) =
-  processExpr fun
-processExpr (L _ (HsStatic _ fun)) =
-  processExpr fun
-processExpr (L _ (HsWrap _ _ fun)) =
-  processExpr (noLoc fun)
-processExpr (L _ (HsBinTick _ _ _ fun)) =
-  processExpr fun
-processExpr (L _ (ExplicitList _ _ funList)) =
-  concatMap processExpr funList
-processExpr (L _ (HsTickPragma _ _ _ _ fun)) =
-  processExpr fun
-processExpr (L _ (HsSCC _ _ _ fun)) =
-  processExpr fun
-processExpr (L _ (HsCoreAnn _ _ _ fun)) =
-  processExpr fun
-processExpr (L _ (ExprWithTySig _ fun _)) =
-  processExpr fun
-processExpr (L _ (HsDo _ _ exprLStmt)) =
+  in [(Just name,Just $ showSDocUnsafe $ ppr $ getLoc $ x,arguments)]
+processExpr arguments (L _ (HsUnboundVar _ _)) = []
+processExpr arguments (L _ (HsApp _ funl funr)) =
+  if (show $ toConstr $ unLoc funr) `elem` ["HsOverLabel","HsIPVar","HsPar","HsLit","HsOverLit","HsUnboundVar","HsConLikeOut"]
+    then
+      let processedArgs = nub $ processArgs (unLoc funr) <> arguments
+          l = processExpr processedArgs funl
+          r = processExpr arguments funr
+      in l
+    else
+      let l = processExpr [] funl
+          r = processExpr arguments funr
+      in l <> r
+processExpr arguments (L _ (OpApp _ funl funm funr)) =
+  let l = processExpr arguments funl
+      m = processExpr arguments funm
+      r = processExpr arguments funr
+  in nub $ l <> m <> r
+processExpr arguments (L _ (NegApp _ funl _)) =
+  processExpr arguments funl
+processExpr arguments (L _ (HsTick _ _ fun)) =
+  processExpr arguments fun
+processExpr arguments (L _ (HsStatic _ fun)) =
+  processExpr arguments fun
+processExpr arguments (L _ x@(HsWrap _ _ fun)) =
+  let r = processArgs x
+  in processExpr (arguments <> r) (noLoc fun)
+processExpr arguments (L _ (HsBinTick _ _ _ fun)) =
+  processExpr arguments fun
+processExpr arguments (L _ (ExplicitList _ _ funList)) =
+  concatMap (processExpr arguments) funList
+processExpr arguments (L _ (HsTickPragma _ _ _ _ fun)) =
+  processExpr arguments fun
+processExpr arguments (L _ (HsSCC _ _ _ fun)) =
+  processExpr arguments fun
+processExpr arguments (L _ (HsCoreAnn _ _ _ fun)) =
+  processExpr arguments fun
+processExpr arguments (L _ (ExprWithTySig _ fun _)) =
+  processExpr arguments fun
+processExpr arguments (L _ (HsDo _ _ exprLStmt)) =
   let stmts = exprLStmt ^? biplateRef :: [LHsExpr GhcTc]
-   in nub $ concatMap processExpr stmts
-processExpr (L _ (HsLet _ exprLStmt func)) =
+   in nub $ concatMap (\x -> 
+                            let processedArgs = processArgs (unLoc x)
+                            in processExpr (processedArgs) x
+                      ) stmts
+processExpr arguments (L _ (HsLet _ exprLStmt func)) =
   let stmts = exprLStmt ^? biplateRef :: [LHsExpr GhcTc]
-   in processExpr func <> nub (concatMap processExpr stmts)
-processExpr (L _ (HsMultiIf _ exprLStmt)) =
+   in processExpr arguments func <> nub (concatMap (processExpr arguments) stmts)
+processExpr arguments (L _ (HsMultiIf _ exprLStmt)) =
   let stmts = exprLStmt ^? biplateRef :: [LHsExpr GhcTc]
-   in nub (concatMap processExpr stmts)
-processExpr (L _ (HsIf _ exprLStmt funl funm funr)) =
+   in nub (concatMap (processExpr arguments) stmts)
+processExpr arguments (L _ (HsIf _ exprLStmt funl funm funr)) =
   let stmts = (exprLStmt ^? biplateRef :: [LHsExpr GhcTc])
-   in nub (concatMap processExpr $ [funl, funm, funr] <> stmts)
-processExpr (L _ (HsCase _ funl exprLStmt)) =
+   in nub (concatMap (processExpr arguments) $ [funl, funm, funr] <> stmts)
+processExpr arguments (L _ (HsCase _ funl exprLStmt)) =
   let stmts = (exprLStmt ^? biplateRef :: [LHsExpr GhcTc])
-   in nub (concatMap processExpr $ [funl] <> stmts)
-processExpr (L _ (ExplicitSum _ _ _ fun)) = processExpr fun
-processExpr (L _ (SectionR _ funl funr)) = processExpr funl <> processExpr funr
-processExpr (L _ (ExplicitTuple _ exprLStmt _)) =
+   in nub (concatMap (processExpr arguments) $ [funl] <> stmts)
+processExpr arguments (L _ (ExplicitSum _ _ _ fun)) = processExpr arguments fun
+processExpr arguments (L _ (SectionR _ funl funr)) = processExpr arguments funl <> processExpr arguments funr
+processExpr arguments (L _ (ExplicitTuple _ exprLStmt _)) =
   let stmts = (exprLStmt ^? biplateRef :: [LHsExpr GhcTc])
-   in nub (concatMap processExpr stmts)
-processExpr (L _ (RecordUpd _ rupd_expr rupd_flds)) = processExpr rupd_expr <> concatMap extractLHsRecUpdField rupd_flds
-processExpr (L _ (HsPar _ fun)) = processExpr fun
-processExpr (L _ (HsAppType _ fun _)) = processExpr fun
-processExpr (L _ (HsLamCase _ exprLStmt)) =
+   in nub (concatMap (processExpr arguments) stmts)
+processExpr arguments (L _ (RecordUpd _ rupd_expr rupd_flds)) = (processExpr arguments rupd_expr) <> concatMap extractLHsRecUpdField rupd_flds
+processExpr arguments (L _ (HsPar _ fun)) =
+  let processedArgs = processArgs (unLoc fun)
+  in processExpr (processedArgs) fun
+processExpr arguments (L _ (HsAppType _ fun _)) = processExpr arguments fun
+processExpr arguments (L _ x@(HsLamCase _ exprLStmt)) =
   let stmts = (exprLStmt ^? biplateRef :: [LHsExpr GhcTc])
-   in nub (concatMap processExpr stmts)
-processExpr (L _ (HsLam _ exprLStmt)) =
+      processedArgs = processArgs (x)
+      res = nub (concatMap (\x ->
+                            let processedArgs = processArgs (unLoc x)
+                            in processExpr (processedArgs) x
+                            ) 
+                            stmts
+                )
+  in case res of
+      [(x,y,[])] -> [(x,y,processedArgs)]
+      _ -> res
+processExpr arguments (L _ x@(HsLam _ exprLStmt)) =
   let stmts = (exprLStmt ^? biplateRef :: [LHsExpr GhcTc])
-   in nub (concatMap processExpr stmts)
-processExpr (L _ (HsLit _ exprLStmt)) =
+      processedArgs = processArgs (x)
+      res = nub (concatMap (\x ->
+                            let processedArgs = processArgs (unLoc x)
+                            in processExpr (processedArgs <> arguments) x
+                            ) 
+                            stmts
+                )
+  in case res of
+      [(x,y,[])] -> [(x,y,processedArgs)]
+      _ -> res
+processExpr arguments (L _ x@(HsLit _ exprLStmt)) =
   let stmts = (exprLStmt ^? biplateRef :: [LHsExpr GhcTc])
-   in nub (concatMap processExpr stmts)
-processExpr (L _ (HsOverLit _ exprLStmt)) =
+      processedArgs = processArgs (x)
+      res = nub (concatMap (\x ->
+                            let processedArgs = processArgs (unLoc x)
+                            in processExpr (processedArgs) x
+                            ) 
+                            stmts
+                )
+  in case res of
+      [(x,y,[])] -> [(x,y,processedArgs)]
+      _ -> res
+processExpr arguments (L _ x@(HsOverLit _ exprLStmt)) =
   let stmts = (exprLStmt ^? biplateRef :: [LHsExpr GhcTc])
-   in nub (concatMap processExpr stmts)
-processExpr (L _ (HsRecFld _ exprLStmt)) =
+      processedArgs = processArgs (x)
+      res = nub (concatMap (\x -> 
+                          let processedArgs = processArgs (unLoc x)
+                          in processExpr (processedArgs <> arguments) x
+                      ) stmts)
+  in case res of
+      [(x,y,[])] -> [(x,y,processedArgs)]
+      _ -> res
+processExpr arguments (L _ (HsRecFld _ exprLStmt)) =
   let stmts = (exprLStmt ^? biplateRef :: [LHsExpr GhcTc])
-   in nub (concatMap processExpr stmts)
-processExpr (L _ (HsSpliceE exprLStmtL exprLStmtR)) =
+   in nub (concatMap (processExpr arguments) stmts)
+processExpr arguments (L _ (HsSpliceE exprLStmtL exprLStmtR)) =
   let stmtsL = (exprLStmtL ^? biplateRef :: [LHsExpr GhcTc])
       stmtsR = (exprLStmtR ^? biplateRef :: [LHsExpr GhcTc])
-   in nub (concatMap processExpr (stmtsL <> stmtsR))
-processExpr (L _ (ArithSeq _ (Just exprLStmtL) exprLStmtR)) =
+   in nub (concatMap (processExpr arguments) (stmtsL <> stmtsR))
+processExpr arguments (L _ (ArithSeq _ (Just exprLStmtL) exprLStmtR)) =
   let stmtsL = (exprLStmtL ^? biplateRef :: [LHsExpr GhcTc])
       stmtsR = (exprLStmtR ^? biplateRef :: [LHsExpr GhcTc])
-   in nub (concatMap processExpr (stmtsL <> stmtsR))
-processExpr (L _ (ArithSeq _ Nothing exprLStmtR)) =
+   in nub (concatMap (processExpr arguments) (stmtsL <> stmtsR))
+processExpr arguments (L _ (ArithSeq _ Nothing exprLStmtR)) =
   let stmtsR = (exprLStmtR ^? biplateRef :: [LHsExpr GhcTc])
-   in nub (concatMap processExpr stmtsR)
-processExpr (L _ (HsRnBracketOut _ exprLStmtL exprLStmtR)) =
+   in nub (concatMap (processExpr arguments) stmtsR)
+processExpr arguments (L _ (HsRnBracketOut _ exprLStmtL exprLStmtR)) =
   let stmtsL = (exprLStmtL ^? biplateRef :: [LHsExpr GhcTc])
       stmtsR = (exprLStmtR ^? biplateRef :: [LHsExpr GhcTc])
-   in nub (concatMap processExpr (stmtsL <> stmtsR))
-processExpr (L _ (HsTcBracketOut _ exprLStmtL exprLStmtR)) =
+   in nub (concatMap (processExpr arguments) (stmtsL <> stmtsR))
+processExpr arguments (L _ (HsTcBracketOut _ exprLStmtL exprLStmtR)) =
   let stmtsL = (exprLStmtL ^? biplateRef :: [LHsExpr GhcTc])
       stmtsR = (exprLStmtR ^? biplateRef :: [LHsExpr GhcTc])
-   in nub (concatMap processExpr (stmtsL <> stmtsR))
+   in nub (concatMap (processExpr arguments) (stmtsL <> stmtsR))
 -- HsIPVar (XIPVar p) HsIPName
 -- HsOverLabel (XOverLabel p) (Maybe (IdP p)) FastString
 -- HsConLikeOut (XConLikeOut p) ConLike
-processExpr _ = []
+processExpr arguments _ = []
 
-extractLHsRecUpdField :: GenLocated l (HsRecField' id (LHsExpr GhcTc)) -> [(Maybe String,Maybe String)]
-extractLHsRecUpdField (L _ (HsRecField _ fun _)) = processExpr fun
+extractLHsRecUpdField :: GenLocated l (HsRecField' id (LHsExpr GhcTc)) -> [(Maybe String,Maybe String,[String])]
+extractLHsRecUpdField (L _ (HsRecField _ fun _)) = 
+    let r = processExpr [] fun
+    in r
 
 processPat :: LPat GhcTc -> [(Name,Maybe String)]
 processPat (L _ pat) = case pat of

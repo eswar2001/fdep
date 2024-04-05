@@ -6,6 +6,7 @@ data FunctionInfo = FunctionInfo
   , module_name :: String
   , name    :: String
   , src_Loc    :: String
+  , arguments :: [String]
   } deriving (Show, Eq, Ord)
 
 data Function = Function
@@ -27,11 +28,12 @@ instance ToJSON MissingTopLevelBindsSignature where
            ]
 
 instance ToJSON FunctionInfo where
-  toJSON (FunctionInfo pkg modName funcName srcLoc) =
+  toJSON (FunctionInfo pkg modName funcName srcLoc arguments) =
     object [ "package_name" .= pkg
            , "module_name"  .= modName
            , "name"         .= funcName
            , "src_loc"         .= srcLoc
+           , "arguments"         .= arguments
            ]
 
 instance ToJSON Function where
@@ -48,6 +50,7 @@ instance FromJSON FunctionInfo where
                  <*> v .: "module_name"
                  <*> v .: "name"
                  <*> v .: "src_loc"
+                 <*> v .: "arguments"
 
 instance FromJSON Function where
   parseJSON = withObject "Function" $ \v ->

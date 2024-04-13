@@ -24,7 +24,6 @@ import Data.List (nub)
 import Data.List.Extra (replace, splitOn)
 import qualified Data.Map as Map
 import Data.Maybe (catMaybes, fromJust, fromMaybe, isJust, mapMaybe)
-import Debug.Trace (trace, traceShowId)
 import DynFlags ()
 import Fdep.Types
 import GHC (
@@ -95,48 +94,59 @@ purePlugin :: [CommandLineOption] -> IO PluginRecompile
 purePlugin _ = return NoForceRecompile
 
 filterList =
-    [ "$_in$show"
-    , "$_in$showsPrec"
-    , "$_in$toConstr"
-    , "$_in$toDomResAcc"
-    , "$_in$toEncoding"
-    , "$_in$toEncodingList"
-    , "$_in$toEnum"
-    , "$_in$toForm"
-    , "$_in$toHaskellString"
-    , "$_in$toInt"
-    , "$_in$toJSON"
-    , "$_in$toJSONList"
-    , "$_in$toJSONWithOptions"
-    , "$_in$gfoldl"
-    , "$_in$ghmParser"
-    , "$_in$gmapM"
-    , "$_in$gmapMo"
-    , "$_in$gmapMp"
-    , "$_in$gmapQ"
-    , "$_in$gmapQi"
-    , "$_in$gmapQl"
-    , "$_in$gmapQr"
-    , "$_in$gmapT"
-    , "$_in$parseField"
-    , "$_in$parseJSON"
-    , "$_in$parseJSONList"
-    , "$_in$parseJSONWithOptions"
-    , "$_in$hasField"
-    , "$_in$gunfold"
-    , "$_in$getField"
-    , "$_in$_mapObjectDeep'"
-    , "$_in$_mapObjectDeep"
-    , "$_in$_mapObjectDeepForSnakeCase"
-    , "$_in$!!"
-    , "$_in$/="
-    , "$_in$<"
-    , "$_in$<="
-    , "$_in$<>"
-    , "$_in$<$"
-    , "$_in$=="
-    , "$_in$>"
-    , "$_in$>="
+    [ "show"
+    , "showsPrec"
+    , "from"
+    , "to"
+    , "toConstr"
+    , "toDomResAcc"
+    , "toEncoding"
+    , "toEncodingList"
+    , "toEnum"
+    , "toForm"
+    , "toHaskellString"
+    , "toInt"
+    , "toJSON"
+    , "toJSONList"
+    , "toJSONWithOptions"
+    , "gfoldl"
+    , "ghmParser"
+    , "gmapM"
+    , "gmapMo"
+    , "gmapMp"
+    , "gmapQ"
+    , "gmapQi"
+    , "gmapQl"
+    , "gmapQr"
+    , "gmapT"
+    , "parseField"
+    , "parseJSON"
+    , "parseJSONList"
+    , "parseJSONWithOptions"
+    , "hasField"
+    , "gunfold"
+    , "getField"
+    , "_mapObjectDeep'"
+    , "_mapObjectDeep"
+    , "_mapObjectDeepForSnakeCase"
+    , "!!"
+    , "/="
+    , "<"
+    , "<="
+    , "<>"
+    , "<$"
+    , "=="
+    , ">"
+    , ">="
+    , "readsPrec"
+    , "readPrec"
+    , "toDyn"
+    , "fromDyn"
+    , "fromDynamic"
+    , "compare"
+    , "readListPrec"
+    , "toXml"
+    , "fromXml"
     ]
 
 fDep :: [CommandLineOption] -> ModSummary -> TcGblEnv -> TcM TcGblEnv
@@ -226,9 +236,8 @@ loopOverLHsBindLR :: LHsBindLR GhcTc GhcTc -> IO [Function]
 loopOverLHsBindLR (L _ x@(FunBind fun_ext id matches _ _)) = do
     let funName = getOccString $ unLoc id
         matchList = mg_alts matches
-    -- let names = map (\x -> (nameStableString x)) $ (x ^? biplateRef :: [Name])
-    -- print names
-    if (nameStableString $ getName id) `elem` filterList
+        fName = nameStableString $ getName id
+    if ((funName) `elem` filterList || (("$_in$$" `isPrefixOf` fName) && (not $ "$_in$$sel:" `isPrefixOf` fName )))
         then pure []
         else do
             (list, funcs) <-

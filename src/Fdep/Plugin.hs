@@ -170,8 +170,8 @@ fDep opts modSummary tcEnv = do
                 let binds = bagToList $ tcg_binds tcEnv
                 depsMapList <- toList $ parallely $ mapM loopOverLHsBindLR $ fromList $ binds
                 functionVsUpdates <- getAllTypeManipulations binds
-                writeFile ((modulePath) <> ".typeUpdates.json") $ (encodePretty $ functionVsUpdates)
                 createDirectoryIfMissing True path
+                writeFile ((modulePath) <> ".typeUpdates.json") $ (encodePretty $ functionVsUpdates)
                 writeFile ((modulePath) <> ".json") (encodePretty $ concat depsMapList)
                 writeFile ((modulePath) <> ".missing.signatures.json") $
                     encodePretty $

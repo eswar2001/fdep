@@ -29,6 +29,8 @@ import DynFlags ()
 import Fdep.Types
 import GHC (
     GRHS (..),
+    FieldOcc(..),
+    rdrNameAmbiguousFieldOcc,
     GRHSs (..),
     GenLocated (L),
     GhcPass,
@@ -69,9 +71,9 @@ import GHC (
 import GHC.Hs.Binds
 import GHC.Hs.Expr (unboundVarOcc)
 import GHC.Hs.Utils as GHCHs
-import GhcPlugins (Plugin (pluginRecompile), PluginRecompile (..), Var (..), binderArgFlag, binderType, binderVars, elemNameSet, getOccString, idName, idType, nameSetElemsStable, ppr, pprPrefixName, pprPrefixOcc, showSDocUnsafe, tidyOpenType, tyConBinders, unLoc, unpackFS)
+import GhcPlugins (RdrName(..),rdrNameOcc,Plugin (pluginRecompile), PluginRecompile (..), Var (..), binderArgFlag, binderType, binderVars, elemNameSet, getOccString, idName, idType, nameSetElemsStable, ppr, pprPrefixName, pprPrefixOcc, showSDocUnsafe, tidyOpenType, tyConBinders, unLoc, unpackFS)
 import HscTypes (ModSummary (..), typeEnvIds)
-import Name (nameStableString)
+import Name (nameStableString,occName,occNameString,occNameSpace,occNameFS,pprNameSpaceBrief)
 import Outputable ()
 import PatSyn
 import Plugins (CommandLineOption, Plugin (typeCheckResultAction), defaultPlugin)
@@ -205,14 +207,27 @@ getAllTypeManipulations binds = do
     getDataTypeDetails (RecordCon _ (L _ (iD)) rcon_flds) = Just (TypeVsFields (nameStableString $ getName $ idName iD) (extractRecordBinds (rcon_flds)))
     getDataTypeDetails (RecordUpd _ rupd_expr rupd_flds) = Just (TypeVsFields (showSDocUnsafe $ ppr rupd_expr) (getFieldUpdates rupd_flds))
 
+    -- inferFieldType :: Name -> String
+    inferFieldTypeFieldOcc (L _ (FieldOcc _ (L _ rdrName))) = handleRdrName rdrName
+    inferFieldTypeAFieldOcc = (handleRdrName . rdrNameAmbiguousFieldOcc . unLoc)
+
+    handleRdrName :: RdrName -> String
+    handleRdrName x = 
+        case x of 
+            Unqual occName          ->               ("$" <> (showSDocUnsafe $ pprNameSpaceBrief $ occNameSpace occName) <>  "$" <> (occNameString occName) <> "$" <> (unpackFS $ occNameFS occName))
+            Qual moduleName occName -> ((moduleNameString moduleName) <> "$" <> (showSDocUnsafe $ pprNameSpaceBrief $ occNameSpace occName) <>  "$" <> (occNameString occName) <> "$" <> (unpackFS $ occNameFS occName))
+            Orig module' occName    -> ((moduleNameString $ moduleName module') <> "$" <> (showSDocUnsafe $ pprNameSpaceBrief $ occNameSpace occName) <>  "$" <> (occNameString occName) <> "$" <> (unpackFS $ occNameFS occName))
+            Exact name              -> nameStableString name
+
     getFieldUpdates :: [LHsRecUpdField GhcTc] -> [FieldRep]
     getFieldUpdates fields = map extractField fields
       where
         extractField :: LHsRecUpdField GhcTc -> FieldRep
         extractField (L _ (HsRecField{hsRecFieldLbl = lbl, hsRecFieldArg = expr, hsRecPun = pun})) =
             if pun
-                then (FieldRep (showSDocUnsafe $ ppr lbl) (showSDocUnsafe $ ppr lbl))
-                else (FieldRep (showSDocUnsafe $ ppr lbl) (showSDocUnsafe $ ppr (unLoc expr)))
+                then (FieldRep (showSDocUnsafe $ ppr lbl) (showSDocUnsafe $ ppr lbl) (inferFieldTypeAFieldOcc lbl))
+                else (FieldRep (showSDocUnsafe $ ppr lbl) (showSDocUnsafe $ ppr (unLoc expr)) (inferFieldTypeAFieldOcc lbl))
+
     extractRecordBinds :: HsRecFields GhcTc (LHsExpr GhcTc) -> [FieldRep]
     extractRecordBinds (HsRecFields{rec_flds = fields}) =
         map extractField fields
@@ -220,8 +235,8 @@ getAllTypeManipulations binds = do
         extractField :: LHsRecField GhcTc (LHsExpr GhcTc) -> FieldRep
         extractField (L _ (HsRecField{hsRecFieldLbl = lbl, hsRecFieldArg = expr, hsRecPun = pun})) =
             if pun
-                then (FieldRep (showSDocUnsafe $ ppr lbl) (showSDocUnsafe $ ppr lbl))
-                else (FieldRep (showSDocUnsafe $ ppr lbl) (showSDocUnsafe $ ppr $ unLoc expr))
+                then (FieldRep (showSDocUnsafe $ ppr lbl) (showSDocUnsafe $ ppr lbl) (inferFieldTypeFieldOcc lbl))
+                else (FieldRep (showSDocUnsafe $ ppr lbl) (showSDocUnsafe $ ppr $ unLoc expr) (inferFieldTypeFieldOcc lbl))
 
     getFunctionName :: LHsBindLR GhcTc GhcTc -> [String]
     getFunctionName (L _ x@(FunBind fun_ext id matches _ _)) = [nameStableString $ getName id]

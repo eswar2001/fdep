@@ -14,6 +14,7 @@ data TypeVsFields = TypeVsFields {
 data FieldRep = FieldRep {
   field_name :: String
   , expression :: String
+  , field_type :: String
 } deriving (Show, Eq, Ord)
 
 data FunctionInfo = FunctionInfo
@@ -87,12 +88,12 @@ instance FromJSON DataTypeUC where
     parseJSON _ = fail "Invalid DataTypeUC JSON"
 
 instance ToJSON FieldRep where
-    toJSON (FieldRep field_name expression) =
-        object ["field_name" .= field_name, "expression" .= expression]
+    toJSON (FieldRep field_name expression field_type) =
+        object ["field_name" .= field_name, "expression" .= expression , "field_type" .= field_type]
 
 instance FromJSON FieldRep where
     parseJSON (Object v) =
-        FieldRep <$> v .: "field_name" <*> v .: "expression"
+        FieldRep <$> v .: "field_name" <*> v .: "expression" <*> v .: "field_type"
     parseJSON _ = fail "Invalid FieldRep JSON"
 
 instance ToJSON TypeVsFields where

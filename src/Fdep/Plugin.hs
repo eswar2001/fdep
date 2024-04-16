@@ -8,6 +8,7 @@ module Fdep.Plugin (plugin) where
 import Annotations
 import Avail
 import Bag (bagToList, listToBag)
+import BasicTypes (FractionalLit (..), IntegralLit (..))
 import Control.Concurrent
 import Control.Exception (SomeException, try)
 import Control.Monad (foldM, when)
@@ -28,8 +29,6 @@ import DynFlags ()
 import Fdep.Types
 import GHC (
     GRHS (..),
-    ol_witness,
-    ol_val,
     GRHSs (..),
     GenLocated (L),
     GhcPass,
@@ -47,6 +46,7 @@ import GHC (
     LHsCmd (..),
     LHsExpr,
     LHsRecField,
+    LHsRecUpdField (..),
     LMatch,
     LPat,
     Match (m_grhss),
@@ -54,21 +54,23 @@ import GHC (
     Module (moduleName),
     Name,
     OutputableBndrId,
+    OverLitVal (..),
     Pat (..),
     PatSynBind (..),
     StmtLR (..),
-    OverLitVal(..),
+    TyCon,
     getName,
     moduleNameString,
     nameSrcSpan,
     noLoc,
+    ol_val,
+    ol_witness,
  )
-import BasicTypes (IntegralLit(..), FractionalLit(..),)
 import GHC.Hs.Binds
 import GHC.Hs.Expr (unboundVarOcc)
 import GHC.Hs.Utils as GHCHs
-import GhcPlugins (unpackFS,Plugin (pluginRecompile), PluginRecompile (..), Var (varName), elemNameSet, getOccString, idName, idType, nameSetElemsStable, ppr, pprPrefixName, pprPrefixOcc, showSDocUnsafe, tidyOpenType, unLoc)
-import HscTypes (ModSummary (..))
+import GhcPlugins (Plugin (pluginRecompile), PluginRecompile (..), Var (..), binderArgFlag, binderType, binderVars, elemNameSet, getOccString, idName, idType, nameSetElemsStable, ppr, pprPrefixName, pprPrefixOcc, showSDocUnsafe, tidyOpenType, tyConBinders, unLoc, unpackFS)
+import HscTypes (ModSummary (..), typeEnvIds)
 import Name (nameStableString)
 import Outputable ()
 import PatSyn
@@ -81,6 +83,7 @@ import System.Directory (createDirectoryIfMissing, getHomeDirectory)
 import TcEnv
 import TcRnTypes (TcGblEnv (..), TcM)
 import TyCoPpr (pprSigmaType, pprTypeApp, pprUserForAll)
+import TyCon
 import Prelude hiding (id, mapM, mapM_, writeFile)
 
 plugin :: Plugin
@@ -158,18 +161,23 @@ fDep opts modSummary tcEnv = do
                     local : _ -> local
                 moduleName' = moduleNameString $ moduleName $ ms_mod modSummary
                 modulePath = prefixPath <> ms_hspp_file modSummary
-            let path = (intercalate "/" . reverse . tail . reverse . splitOn "/") modulePath
-            print ("generating dependancy for module: " <> moduleName' <> " at path: " <> path)
-            depsMapList <- toList $ parallely $ mapM loopOverLHsBindLR $ fromList $ bagToList $ tcg_binds tcEnv
-            createDirectoryIfMissing True path
-            writeFile ((modulePath) <> ".json") (encodePretty $ concat depsMapList)
-            writeFile ((modulePath) <> ".missing.signatures.json") $
-                encodePretty $
-                    Map.fromList $
-                        map (\element -> (\(x, y) -> (x, typeSignature y)) $ filterForMaxLenTypSig element) $
-                            groupBy (\a b -> (srcSpan a) == (srcSpan b)) $
-                                dumpMissingTypeSignatures tcEnv
-            print ("generated dependancy for module: " <> moduleName' <> " at path: " <> path)
+            when True $ do
+                --  (moduleName' == "Euler.Server") $
+                let path = (intercalate "/" . reverse . tail . reverse . splitOn "/") modulePath
+                print ("generating dependancy for module: " <> moduleName' <> " at path: " <> path)
+                let binds = bagToList $ tcg_binds tcEnv
+                depsMapList <- toList $ parallely $ mapM loopOverLHsBindLR $ fromList $ binds
+                functionVsUpdates <- getAllTypeManipulations binds
+                writeFile ((modulePath) <> ".typeUpdates.json") $ (encodePretty $ functionVsUpdates)
+                createDirectoryIfMissing True path
+                writeFile ((modulePath) <> ".json") (encodePretty $ concat depsMapList)
+                writeFile ((modulePath) <> ".missing.signatures.json") $
+                    encodePretty $
+                        Map.fromList $
+                            map (\element -> (\(x, y) -> (x, typeSignature y)) $ filterForMaxLenTypSig element) $
+                                groupBy (\a b -> (srcSpan a) == (srcSpan b)) $
+                                    dumpMissingTypeSignatures tcEnv
+                print ("generated dependancy for module: " <> moduleName' <> " at path: " <> path)
     return tcEnv
   where
     filterForMaxLenTypSig :: [MissingTopLevelBindsSignature] -> (String, MissingTopLevelBindsSignature)
@@ -178,6 +186,48 @@ fDep opts modSummary tcEnv = do
             [el] -> (srcSpan $ el, el)
             [el1, el2] -> (srcSpan el1, bool (el2) (el1) ((length $ typeSignature $ el1) > (length $ typeSignature $ el2)))
             (xx : xs) -> (\(y, yy) -> (srcSpan xx, bool (yy) (xx) ((length $ typeSignature $ xx) > (length $ typeSignature $ yy)))) $ filterForMaxLenTypSig xs
+
+getAllTypeManipulations :: [LHsBindLR GhcTc GhcTc] -> IO [DataTypeUC]
+getAllTypeManipulations binds = do
+    bindWiseUpdates <-
+        toList $
+            parallely $
+                mapM
+                    ( \x -> do
+                        let functionName = getFunctionName x
+                            filterRecordUpdateAndCon = filter (\x -> ((show $ toConstr x) `elem` ["RecordCon", "RecordUpd"])) (x ^? biplateRef :: [HsExpr GhcTc])
+                        pure $ bool (Nothing) (Just (DataTypeUC functionName (mapMaybe getDataTypeDetails filterRecordUpdateAndCon))) (length filterRecordUpdateAndCon > 0)
+                    )
+                    (fromList binds)
+    pure $ catMaybes bindWiseUpdates
+  where
+    getDataTypeDetails :: HsExpr GhcTc -> Maybe TypeVsFields
+    getDataTypeDetails (RecordCon _ (L _ (iD)) rcon_flds) = Just (TypeVsFields (nameStableString $ getName $ idName iD) (extractRecordBinds (rcon_flds)))
+    getDataTypeDetails (RecordUpd _ rupd_expr rupd_flds) = Just (TypeVsFields (showSDocUnsafe $ ppr rupd_expr) (getFieldUpdates rupd_flds))
+
+    getFieldUpdates :: [LHsRecUpdField GhcTc] -> [FieldRep]
+    getFieldUpdates fields = map extractField fields
+      where
+        extractField :: LHsRecUpdField GhcTc -> FieldRep
+        extractField (L _ (HsRecField{hsRecFieldLbl = lbl, hsRecFieldArg = expr, hsRecPun = pun})) =
+            if pun
+                then (FieldRep (showSDocUnsafe $ ppr lbl) (showSDocUnsafe $ ppr lbl))
+                else (FieldRep (showSDocUnsafe $ ppr lbl) (showSDocUnsafe $ ppr (unLoc expr)))
+    extractRecordBinds :: HsRecFields GhcTc (LHsExpr GhcTc) -> [FieldRep]
+    extractRecordBinds (HsRecFields{rec_flds = fields}) =
+        map extractField fields
+      where
+        extractField :: LHsRecField GhcTc (LHsExpr GhcTc) -> FieldRep
+        extractField (L _ (HsRecField{hsRecFieldLbl = lbl, hsRecFieldArg = expr, hsRecPun = pun})) =
+            if pun
+                then (FieldRep (showSDocUnsafe $ ppr lbl) (showSDocUnsafe $ ppr lbl))
+                else (FieldRep (showSDocUnsafe $ ppr lbl) (showSDocUnsafe $ ppr $ unLoc expr))
+
+    getFunctionName :: LHsBindLR GhcTc GhcTc -> [String]
+    getFunctionName (L _ x@(FunBind fun_ext id matches _ _)) = [nameStableString $ getName id]
+    getFunctionName (L _ (VarBind{var_id = var, var_rhs = expr, var_inline = inline})) = [nameStableString $ getName var]
+    getFunctionName (L _ (PatBind{pat_lhs = pat, pat_rhs = expr})) = [""]
+    getFunctionName (L _ (AbsBinds{abs_binds = binds})) = concatMap getFunctionName $ bagToList binds
 
 dumpMissingTypeSignatures :: TcGblEnv -> [MissingTopLevelBindsSignature]
 dumpMissingTypeSignatures gbl_env =
@@ -210,13 +260,13 @@ dumpMissingTypeSignatures gbl_env =
     processHsLocalBindsForWhereFunctions (HsValBinds _ (XValBindsLR (NValBinds x _))) = map (\(_, binds) -> binds) $ x
     processHsLocalBindsForWhereFunctions x = []
 
-transformFromNameStableString :: (Maybe String, Maybe String, [String]) -> Maybe FunctionInfo
-transformFromNameStableString (Just str, Just loc, args) =
+transformFromNameStableString :: (Maybe String, Maybe String, Maybe String, [String]) -> Maybe FunctionInfo
+transformFromNameStableString (Just str, Just loc, _type, args) =
     let parts = filter (\x -> x /= "") $ splitOn ("$") str
-     in Just $ if length parts == 2 then FunctionInfo "" (parts !! 0) (parts !! 1) loc args else FunctionInfo (parts !! 0) (parts !! 1) (parts !! 2) loc args
-transformFromNameStableString (Just str, Nothing, args) =
+     in Just $ if length parts == 2 then FunctionInfo "" (parts !! 0) (parts !! 1) (fromMaybe "<unknown>" _type) loc args else FunctionInfo (parts !! 0) (parts !! 1) (parts !! 2) (fromMaybe "<unknown>" _type) loc args
+transformFromNameStableString (Just str, Nothing, _type, args) =
     let parts = filter (\x -> x /= "") $ splitOn ("$") str
-     in Just $ if length parts == 2 then FunctionInfo "" (parts !! 0) (parts !! 1) "<no location info>" args else FunctionInfo (parts !! 0) (parts !! 1) (parts !! 2) "<no location info>" args
+     in Just $ if length parts == 2 then FunctionInfo "" (parts !! 0) (parts !! 1) (fromMaybe "<unknown>" _type) "<no location info>" args else FunctionInfo (parts !! 0) (parts !! 1) (parts !! 2) (fromMaybe "<unknown>" _type) "<no location info>" args
 
 filterFunctionInfos :: [Maybe FunctionInfo] -> IO [Maybe FunctionInfo]
 filterFunctionInfos infos = do
@@ -237,7 +287,7 @@ loopOverLHsBindLR (L _ x@(FunBind fun_ext id matches _ _)) = do
     let funName = getOccString $ unLoc id
         matchList = mg_alts matches
         fName = nameStableString $ getName id
-    if ((funName) `elem` filterList || (("$_in$$" `isPrefixOf` fName) && (not $ "$_in$$sel:" `isPrefixOf` fName )))
+    if False --((funName) `elem` filterList || (("$_in$$" `isPrefixOf` fName) && (not $ "$_in$$sel:" `isPrefixOf` fName )))
         then pure []
         else do
             (list, funcs) <-
@@ -250,9 +300,10 @@ loopOverLHsBindLR (L _ x@(FunBind fun_ext id matches _ _)) = do
                     (unLoc matchList)
             listTransformed <- filterFunctionInfos $ map transformFromNameStableString list
             pure [(Function funName listTransformed (nub funcs) (showSDocUnsafe $ ppr $ getLoc id))]
-loopOverLHsBindLR (L _ VarBind{var_rhs = rhs}) = do
+loopOverLHsBindLR x@(L _ VarBind{var_rhs = rhs}) = do
     pure [(Function "" (map transformFromNameStableString $ processExpr [] rhs) [] "")]
-loopOverLHsBindLR (L _ AbsBinds{abs_binds = binds}) = do
+loopOverLHsBindLR x@(L _ AbsBinds{abs_binds = binds}) = do
+    -- print $ showSDocUnsafe $ ppr binds
     list <- toList $ parallely $ mapM loopOverLHsBindLR $ fromList $ bagToList binds
     pure (concat list)
 loopOverLHsBindLR (L _ (PatSynBind _ PSB{psb_def = def})) = do
@@ -264,11 +315,21 @@ loopOverLHsBindLR (L _ (PatSynBind _ (XPatSynBind _))) = do
 loopOverLHsBindLR (L _ (XHsBindsLR _)) = do
     pure []
 loopOverLHsBindLR (L _ (PatBind _ _ pat_rhs _)) = do
-    pure []
-    -- let l = map transformFromNameStableString $ concatMap processGRHS $ grhssGRHSs pat_rhs
-    -- pure [(Function "" l [] "")]
+    r <- toList $ parallely $ mapM processGRHS $ fromList $ grhssGRHSs pat_rhs
+    let l = map transformFromNameStableString $ concat r
+    pure [(Function "" l [] "")]
 
-processMatch :: LMatch GhcTc (LHsExpr GhcTc) -> IO ([(Maybe String, Maybe String, [String])], [Function])
+-- checkIfCreateOrUpdtingDataTypes binds = mapM_ (go) (fromList $ bagToList binds)
+--     where
+--         go (L _ (FunBind fun_ext id matches _ _)) = do
+
+--             pure ()
+--         go (L _ VarBind{var_rhs = rhs}) = pure ()
+--         go (L _ AbsBinds{abs_binds = binds}) = pure ()
+--         go (L _ (PatSynBind _ PSB{psb_def = def})) = pure ()
+--         go (L _ (PatSynBind _ (XPatSynBind _))) = pure ()
+
+processMatch :: LMatch GhcTc (LHsExpr GhcTc) -> IO ([(Maybe String, Maybe String, Maybe String, [String])], [Function])
 processMatch (L _ match) = do
     -- let stmts = match ^? biplateRef :: [StmtLR GhcTc GhcTc (LHsExpr GhcTc)]
     -- mapM (print . showSDocUnsafe . ppr) stmts
@@ -279,7 +340,7 @@ processMatch (L _ match) = do
     r <- toList $ parallely $ (mapM processGRHS (fromList $ grhssGRHSs (m_grhss match)))
     pure $ (concat r, whereClause)
 
-processGRHS :: LGRHS GhcTc (LHsExpr GhcTc) -> IO [(Maybe String, Maybe String, [String])]
+processGRHS :: LGRHS GhcTc (LHsExpr GhcTc) -> IO [(Maybe String, Maybe String, Maybe String, [String])]
 processGRHS (L _ (GRHS _ _ body)) = do
     pure $ processExpr [] body
 processGRHS _ = pure $ []
@@ -312,10 +373,11 @@ processArgs (funr) = case funr of
     (HsApp _ funl funr) -> processArgs (unLoc funr) <> processArgs (unLoc funl)
     _ -> []
 
-processExpr :: [String] -> LHsExpr GhcTc -> [(Maybe String, Maybe String, [String])]
+processExpr :: [String] -> LHsExpr GhcTc -> [(Maybe String, Maybe String, Maybe String, [String])]
 processExpr arguments x@(L _ (HsVar _ (L _ var))) =
     let name = nameStableString $ varName var
-     in [(Just name, Just $ showSDocUnsafe $ ppr $ getLoc $ x, arguments)]
+        _type = showSDocUnsafe $ ppr $ varType var
+     in [(Just name, Just $ showSDocUnsafe $ ppr $ getLoc $ x, Just _type, arguments)]
 processExpr arguments (L _ (HsUnboundVar _ _)) = []
 processExpr arguments (L _ (HsApp _ funl funr)) =
     let processedArgs = nub $ processArgs (unLoc funr) <> arguments
@@ -392,7 +454,7 @@ processExpr arguments (L _ x@(HsLamCase _ exprLStmt)) =
                     stmts
                 )
      in case res of
-            [(x, y, [])] -> [(x, y, processedArgs)]
+            [(x, y, t, [])] -> [(x, y, t, processedArgs)]
             _ -> res
 processExpr arguments (L _ x@(HsLam _ exprLStmt)) =
     let stmts = (exprLStmt ^? biplateRef :: [LHsExpr GhcTc])
@@ -407,12 +469,12 @@ processExpr arguments (L _ x@(HsLam _ exprLStmt)) =
                     stmts
                 )
      in case res of
-            [(x, y, [])] -> [(x, y, processedArgs)]
+            [(x, y, t, [])] -> [(x, y, t, processedArgs)]
             _ -> res
 processExpr arguments y@(L _ x@(HsLit _ hsLit)) =
-  [(Just $ ("$_lit$" <> (showSDocUnsafe $ ppr hsLit)),(Just $ showSDocUnsafe $ ppr $ getLoc $ y),[])]
+    [(Just $ ("$_lit$" <> (showSDocUnsafe $ ppr hsLit)), (Just $ showSDocUnsafe $ ppr $ getLoc $ y), (Just $ show $ toConstr hsLit), [])]
 processExpr arguments y@(L _ x@(HsOverLit _ overLitVal)) =
-  [(Just $ ("$_lit$" <> (showSDocUnsafe $ ppr overLitVal)),(Just $ showSDocUnsafe $ ppr $ getLoc $ y),[])]
+    [(Just $ ("$_lit$" <> (showSDocUnsafe $ ppr overLitVal)), (Just $ showSDocUnsafe $ ppr $ getLoc $ y), (Just $ show $ toConstr overLitVal), [])]
 processExpr arguments (L _ (HsRecFld _ exprLStmt)) =
     let stmts = (exprLStmt ^? biplateRef :: [LHsExpr GhcTc])
      in nub (concatMap (processExpr arguments) stmts)
@@ -440,7 +502,7 @@ processExpr arguments (L _ (HsTcBracketOut _ exprLStmtL exprLStmtR)) =
 -- HsConLikeOut (XConLikeOut p) ConLike
 processExpr arguments _ = []
 
-extractLHsRecUpdField :: GenLocated l (HsRecField' id (LHsExpr GhcTc)) -> [(Maybe String, Maybe String, [String])]
+extractLHsRecUpdField :: GenLocated l (HsRecField' id (LHsExpr GhcTc)) -> [(Maybe String, Maybe String, Maybe String, [String])]
 extractLHsRecUpdField (L _ (HsRecField _ fun _)) = processExpr [] fun
 
 processPat :: LPat GhcTc -> [(Name, Maybe String)]

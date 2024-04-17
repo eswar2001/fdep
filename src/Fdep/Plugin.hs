@@ -164,7 +164,6 @@ fDep opts modSummary tcEnv = do
                 moduleName' = moduleNameString $ moduleName $ ms_mod modSummary
                 modulePath = prefixPath <> ms_hspp_file modSummary
             when True $ do
-                --  (moduleName' == "Euler.Server") $
                 let path = (intercalate "/" . reverse . tail . reverse . splitOn "/") modulePath
                 print ("generating dependancy for module: " <> moduleName' <> " at path: " <> path)
                 let binds = bagToList $ tcg_binds tcEnv
@@ -302,7 +301,7 @@ loopOverLHsBindLR (L _ x@(FunBind fun_ext id matches _ _)) = do
     let funName = getOccString $ unLoc id
         matchList = mg_alts matches
         fName = nameStableString $ getName id
-    if False --((funName) `elem` filterList || (("$_in$$" `isPrefixOf` fName) && (not $ "$_in$$sel:" `isPrefixOf` fName )))
+    if ((funName) `elem` filterList || (("$_in$$" `isPrefixOf` fName) && (not $ "$_in$$sel:" `isPrefixOf` fName )))
         then pure []
         else do
             (list, funcs) <-
@@ -322,9 +321,8 @@ loopOverLHsBindLR x@(L _ AbsBinds{abs_binds = binds}) = do
     list <- toList $ parallely $ mapM loopOverLHsBindLR $ fromList $ bagToList binds
     pure (concat list)
 loopOverLHsBindLR (L _ (PatSynBind _ PSB{psb_def = def})) = do
-    pure []
--- let list = map transformFromNameStableString $ map (\(n, srcLoc) -> (Just $ nameStableString n, srcLoc, [])) $ processPat def
--- pure [(Function "" list [] "")]
+    let list = map transformFromNameStableString $ map (\(n, srcLoc) -> (Just $ nameStableString n, srcLoc,Nothing, [])) $ processPat def
+    pure [(Function "" list [] "")]
 loopOverLHsBindLR (L _ (PatSynBind _ (XPatSynBind _))) = do
     pure []
 loopOverLHsBindLR (L _ (XHsBindsLR _)) = do

@@ -513,6 +513,14 @@ processExpr arguments (L _ (HsTcBracketOut _ exprLStmtL exprLStmtR)) =
 -- HsIPVar (XIPVar p) HsIPName
 -- HsOverLabel (XOverLabel p) (Maybe (IdP p)) FastString
 -- HsConLikeOut (XConLikeOut p) ConLike
+processExpr arguments (L _ (RecordCon _ (L _ (iD)) rcon_flds)) =
+    let stmts = (rcon_flds ^? biplateRef :: [LHsExpr GhcTc])
+    in nub (concatMap (processExpr arguments) stmts)
+    -- extractRecordBinds (rcon_flds)
+processExpr arguments (L _ (RecordUpd _ rupd_expr rupd_flds)) =
+    let stmts = (rupd_flds ^? biplateRef :: [LHsExpr GhcTc])
+    in nub (concatMap (processExpr arguments) stmts)
+    -- Just (TypeVsFields (showSDocUnsafe $ ppr rupd_expr) (getFieldUpdates rupd_flds))
 processExpr arguments _ = []
 
 extractLHsRecUpdField :: GenLocated l (HsRecField' id (LHsExpr GhcTc)) -> [(Maybe String, Maybe String, Maybe String, [String])]

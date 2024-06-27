@@ -169,6 +169,7 @@ collectDecls opts modSummary hsParsedModule =  do
                 modulePath = prefixPath <> ms_hspp_file modSummary
                 path = (intercalate "/" . reverse . tail . reverse . splitOn "/") modulePath
                 declsList = hsmodDecls $ unLoc $ hpm_module $ hsParsedModule
+            createDirectoryIfMissing True path
             functionsVsCodeString <- toList $ parallely $ mapM (getDecls) $ fromList $ declsList
             writeFile ((modulePath) <> ".function_code.json") (encodePretty $ Map.fromList $ concat functionsVsCodeString)
     pure hsParsedModule
